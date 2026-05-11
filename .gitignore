@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Model files (large binaries — download separately)
+sidecar/models/whisper-large-v3-turbo/
+sidecar/models/whisper-large-v3-turbo-ct2/
+sidecar/models/models--*/
+sidecar/models/*.gguf
+sidecar/models/*.bin
+sidecar/models/*.ot
+
+# Runtime data
+sidecar/data/
+~/.vox/
+
+# PyInstaller output
+sidecar/dist/
+sidecar/build/
+
+# Node
+node_modules/
+dist/
+
+# Rust
+target/
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user

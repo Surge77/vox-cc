@@ -1,0 +1,126 @@
+import asyncio
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from audio.pipeline import DictationSession
+
+router = APIRouter()
+
+
+async def _run_final_pass(session: DictationSession, state, fallback: str) -> str:
+    plan = state._load_plan.get("final_pass", "skip")
+
+    if plan == "distil_sequential":
+        from models.dual_loader import run_distil_final_pass
+        audio = session.get_full_audio()
+        if len(audio) == 0:
+            return fallback
+        try:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, run_distil_final_pass, audio, state._turbo_model_ref),
+                timeout=30.0,
+            )
+            return result if result.strip() else fallback
+        except (asyncio.TimeoutError, Exception):
+            return fallback
+
+    return fallback
+
+
+@router.websocket("/ws/dictation")
+async def dictation_ws(ws: WebSocket):
+    await ws.accept()
+    import main as state
+
+    session: DictationSession | None = None
+
+    try:
+        while True:
+            msg = await ws.receive_json()
+            command = msg.get("command")
+
+            if command == "begin_stream":
+                if state._session_active:
+                    await ws.send_json({"type": "error", "message": "Session already active"})
+                    continue
+                if state._training_active:
+                    await ws.send_json({"type": "error", "message": "Training in progress"})
+                    continue
+
+                if state._load_plan.get("final_pass") == "distil_sequential":
+                    from models.dual_loader import reload_turbo_if_needed
+                    await asyncio.to_thread(reload_turbo_if_needed, state._turbo_model_ref)
+
+                state._session_active = True
+                session = DictationSession(state._turbo_model_ref, state._load_plan)
+                session.open_mic()
+                asyncio.ensure_future(_capture_loop(session, ws, state))
+
+            elif command == "terminate_stream":
+                if session and session.is_active():
+                    session.close_mic()
+                    fallback = session.build_turbo_fallback()
+                    final_text = await _run_final_pass(session, state, fallback)
+                    await ws.send_json({
+                        "type": "handoff_ready",
+                        "canary_transcript": final_text,
+                    })
+                    session.reset()
+                    session = None
+                state._session_active = False
+
+            elif command == "cancel_stream":
+                if session and session.is_active():
+                    session.close_mic()
+                    session.reset()
+                    session = None
+                state._session_active = False
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if session and session.is_active():
+            session.close_mic()
+        state._session_active = False
+
+
+async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None:
+    from audio.pipeline import CHUNK_SAMPLES
+    import numpy as np
+    accumulator: list = []
+    accumulated = 0
+
+    try:
+        while session.is_active():
+            chunk = await asyncio.to_thread(session._capture.read_chunk)
+            accumulator.append(chunk)
+            accumulated += len(chunk)
+
+            if accumulated < CHUNK_SAMPLES:
+                continue
+
+            full_chunk = np.concatenate(accumulator)
+            accumulator = []
+            accumulated = 0
+
+            auto_terminate = await session.process_chunk(full_chunk, ws)
+            if auto_terminate:
+                session.close_mic()
+                fallback = session.build_turbo_fallback()
+                final_text = await _run_final_pass(session, state, fallback)
+                try:
+                    await ws.send_json({
+                        "type": "handoff_ready",
+                        "canary_transcript": final_text,
+                    })
+                except Exception:
+                    pass
+                session.reset()
+                state._session_active = False
+                return
+    except Exception as e:
+        try:
+            await ws.send_json({"type": "error", "message": f"Capture error: {e}"})
+        except Exception:
+            pass
+        session.close_mic()
+        state._session_active = False

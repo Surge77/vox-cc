@@ -1,0 +1,26 @@
+# Install torch with CUDA index first:
+#   pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# Then install the rest:
+#   pip install -r requirements.txt
+# For GTX 1650 (Turing sm_75) llama-cpp-python CUDA wheel (default PyPI wheel is CPU-only):
+#   pip install llama-cpp-python==0.2.90 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+# ctranslate2>=4.5.0 required for cuDNN 9 (bundled with torch 2.4.1+cu121). 4.4.0 needs separate cuDNN 8 install.
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pyaudio==0.2.14
+faster-whisper==1.0.3
+ctranslate2==4.7.1
+transformers==4.44.2
+bitsandbytes==0.43.3
+torch==2.4.1+cu121
+torchaudio==2.4.1+cu121
+scipy==1.14.1
+numpy==1.26.4
+peft==0.12.0
+noisereduce==3.0.2
+llama-cpp-python==0.2.90
+pydantic==2.8.2
+httpx==0.27.2
+groq==0.9.0
+websockets==12.0
