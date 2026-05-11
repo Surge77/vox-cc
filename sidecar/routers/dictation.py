@@ -1,8 +1,33 @@
 import asyncio
+import json
+import os
+import uuid as _uuid_mod
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from audio.pipeline import DictationSession
 
 router = APIRouter()
+
+
+def _maybe_save_audio(session: DictationSession, state) -> None:
+    """Save full session audio as .npy if passive collection is enabled. Sets state._pending_audio_uuid."""
+    settings_path = os.path.join(state.DATA_DIR, "settings.json")
+    try:
+        with open(settings_path) as f:
+            if not json.load(f).get("passive_collection_enabled", False):
+                return
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+
+    audio = session.get_full_audio()
+    if len(audio) == 0:
+        return
+
+    clips_dir = os.path.join(state.DATA_DIR, "audio_clips")
+    os.makedirs(clips_dir, exist_ok=True)
+    uid = str(_uuid_mod.uuid4())
+    np.save(os.path.join(clips_dir, f"{uid}.npy"), audio)
+    state._pending_audio_uuid = uid
 
 
 async def _run_final_pass(session: DictationSession, state, fallback: str) -> str:
@@ -68,6 +93,7 @@ async def dictation_ws(ws: WebSocket):
                         capture_task = None
                     # Now safe: capture thread has finished its last read
                     session.close_stream()
+                    _maybe_save_audio(session, state)
                     fallback = session.build_turbo_fallback()
                     final_text = await _run_final_pass(session, state, fallback)
                     await ws.send_json({

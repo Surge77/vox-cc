@@ -94,12 +94,17 @@ def _append_passive_log(data_dir: str, raw: str, cleaned: str, executable_name: 
         return
 
     from models.prompt_router import get_profile
+    import main as state
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "raw_asr": raw,
         "user_edited": cleaned,
         "profile": get_profile(executable_name),
     }
+    if state._pending_audio_uuid:
+        entry["audio_file"] = f"{state._pending_audio_uuid}.npy"
+        state._pending_audio_uuid = None
+
     log_path = os.path.join(data_dir, "passive_log.jsonl")
     os.makedirs(data_dir, exist_ok=True)
     try:

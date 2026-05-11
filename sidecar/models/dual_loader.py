@@ -21,6 +21,10 @@ def _get_vocab_prompt() -> str:
 
 def load_distil():
     from faster_whisper import WhisperModel
+    # Prefer fine-tuned model if produced by /finetune/start
+    lora_ct2 = os.path.join(MODEL_DIR, "distil-lora-ct2")
+    if os.path.isfile(os.path.join(lora_ct2, "model.bin")):
+        return WhisperModel(lora_ct2, device="cuda", compute_type="int8")
     return WhisperModel(
         DISTIL_MODEL_ID,
         device="cuda",

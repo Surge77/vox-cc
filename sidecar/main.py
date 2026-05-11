@@ -28,6 +28,7 @@ _session_active: bool = False
 _training_active: bool = False
 _turbo_model_ref: list = [None]  # list so M3 distil_sequential can null it in place
 _llm_ref: list = [None]
+_pending_audio_uuid: str | None = None  # set by terminate_stream when collection on; cleared by /process-text
 
 
 def get_vram_free_mb() -> int:
