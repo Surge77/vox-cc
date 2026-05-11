@@ -1,7 +1,7 @@
 import numpy as np
 import noisereduce as nr
 
-SILENCE_RMS_THRESHOLD = 0.01
+SILENCE_RMS_THRESHOLD = 0.005
 NOISE_RMS_FLOOR = 0.005
 
 HALLUCINATION_PHRASES = {

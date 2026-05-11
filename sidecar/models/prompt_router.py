@@ -37,9 +37,13 @@ def _load_prompt(name: str) -> str:
         return f.read().strip()
 
 
-def get_system_prompt(executable_name: str) -> str:
+def get_profile(executable_name: str) -> str:
     key = (executable_name or "").lower().replace(".exe", "").strip()
-    profile = _EXEC_MAP.get(key, "neutral_fallback")
+    return _EXEC_MAP.get(key, "neutral_fallback")
+
+
+def get_system_prompt(executable_name: str) -> str:
+    profile = get_profile(executable_name)
     try:
         return _load_prompt(profile)
     except FileNotFoundError:

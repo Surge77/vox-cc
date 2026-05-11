@@ -32,6 +32,7 @@ async def dictation_ws(ws: WebSocket):
     import main as state
 
     session: DictationSession | None = None
+    capture_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -53,11 +54,20 @@ async def dictation_ws(ws: WebSocket):
                 state._session_active = True
                 session = DictationSession(state._turbo_model_ref, state._load_plan)
                 session.open_mic()
-                asyncio.ensure_future(_capture_loop(session, ws, state))
+                capture_task = asyncio.ensure_future(_capture_loop(session, ws, state))
 
             elif command == "terminate_stream":
                 if session and session.is_active():
-                    session.close_mic()
+                    # Signal capture loop to stop — do NOT close stream yet (race with read thread)
+                    session.stop_capture()
+                    if capture_task is not None:
+                        try:
+                            await asyncio.wait_for(capture_task, timeout=1.0)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                        capture_task = None
+                    # Now safe: capture thread has finished its last read
+                    session.close_stream()
                     fallback = session.build_turbo_fallback()
                     final_text = await _run_final_pass(session, state, fallback)
                     await ws.send_json({
@@ -70,7 +80,14 @@ async def dictation_ws(ws: WebSocket):
 
             elif command == "cancel_stream":
                 if session and session.is_active():
-                    session.close_mic()
+                    session.stop_capture()
+                    if capture_task is not None:
+                        try:
+                            await asyncio.wait_for(capture_task, timeout=1.0)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                        capture_task = None
+                    session.close_stream()
                     session.reset()
                     session = None
                 state._session_active = False
@@ -79,7 +96,13 @@ async def dictation_ws(ws: WebSocket):
         pass
     finally:
         if session and session.is_active():
-            session.close_mic()
+            session.stop_capture()
+            if capture_task is not None:
+                try:
+                    await asyncio.wait_for(capture_task, timeout=1.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            session.close_stream()
         state._session_active = False
 
 
@@ -92,6 +115,9 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
     try:
         while session.is_active():
             chunk = await asyncio.to_thread(session._capture.read_chunk)
+            if not session.is_active():
+                # stop_capture() was called while we were reading — discard chunk, exit
+                break
             accumulator.append(chunk)
             accumulated += len(chunk)
 
@@ -104,7 +130,8 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
 
             auto_terminate = await session.process_chunk(full_chunk, ws)
             if auto_terminate:
-                session.close_mic()
+                session.stop_capture()
+                session.close_stream()
                 fallback = session.build_turbo_fallback()
                 final_text = await _run_final_pass(session, state, fallback)
                 try:
@@ -122,5 +149,6 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
             await ws.send_json({"type": "error", "message": f"Capture error: {e}"})
         except Exception:
             pass
-        session.close_mic()
+        session.stop_capture()
+        session.close_stream()
         state._session_active = False

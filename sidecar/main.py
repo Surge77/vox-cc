@@ -1,9 +1,12 @@
 import sys
 import os
 import json
+import logging
 import socket
 import asyncio
 import warnings
+
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 from contextlib import asynccontextmanager
 
 # Suppress HF hub symlink warning on Windows without Developer Mode (files download fine without symlinks)
@@ -196,9 +199,13 @@ app = FastAPI(lifespan=lifespan)
 from routers.health import router as health_router
 from routers.dictation import router as dictation_router
 from routers.text_processing import router as text_processing_router
+from routers.vocabulary import router as vocabulary_router
+from routers.finetuning import router as finetuning_router
 app.include_router(health_router)
 app.include_router(dictation_router)
 app.include_router(text_processing_router)
+app.include_router(vocabulary_router)
+app.include_router(finetuning_router)
 
 
 if __name__ == "__main__":

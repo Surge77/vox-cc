@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 import numpy as np
 
 from audio.capture import AudioCapture, SAMPLE_RATE
-from audio.vad import should_transcribe, is_hallucination, suppress_noise
+from audio.vad import should_transcribe, is_hallucination, suppress_noise, SILENCE_RMS_THRESHOLD
+
+logger = logging.getLogger(__name__)
 
 CHUNK_MS = 1000
 OVERLAP_MS = 200
@@ -40,11 +43,23 @@ class DictationSession:
         self._capture.open()
         self._active = True
 
-    def close_mic(self) -> None:
+    def stop_capture(self) -> None:
+        """Signal the capture loop to stop. Does NOT close the PyAudio stream.
+        Call close_stream() only after the capture loop task has finished to
+        avoid closing the stream while read_chunk is running in its thread."""
         self._active = False
+
+    def close_stream(self) -> None:
+        """Close the PyAudio stream. Must only be called after the capture loop
+        task has completed (i.e., after awaiting capture_task in dictation.py)."""
         if self._capture:
             self._capture.close()
             self._capture = None
+
+    def close_mic(self) -> None:
+        """Legacy: stop + close in one call. Safe only when no capture thread is running."""
+        self.stop_capture()
+        self.close_stream()
 
     def is_active(self) -> bool:
         return self._active
@@ -52,20 +67,20 @@ class DictationSession:
     async def process_chunk(self, chunk: np.ndarray, ws) -> bool:
         """
         Process one audio chunk. Returns True if session should auto-terminate (60s cap).
-        ring stores raw audio for M3 final-pass faithfulness; Turbo gets noise-suppressed feed.
+        Ring always stores every chunk so distil final pass gets complete session audio.
+        Turbo transcription is skipped on silent chunks (RMS gate) to avoid hallucinations.
         """
-        if not should_transcribe(chunk):
-            return False
-
-        # overlap from previous raw chunk tail (get before appending current)
+        # Always store in ring — distil needs the full session, not just voiced chunks
         overlap = self._ring[-1][-OVERLAP_SAMPLES:] if self._ring else np.array([], dtype=np.float32)
-
-        # store raw chunk in ring
         self._ring.append(chunk)
 
         total = sum(len(c) for c in self._ring)
         if total >= MAX_SAMPLES:
             return True
+
+        # Skip Turbo on silent chunks
+        if not should_transcribe(chunk):
+            return False
 
         turbo = self._turbo_ref[0]
         if turbo is None:

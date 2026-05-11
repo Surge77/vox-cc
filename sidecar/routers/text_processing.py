@@ -1,4 +1,5 @@
 import asyncio
+import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -33,26 +34,32 @@ async def process_text(req: ProcessTextRequest):
     if not raw:
         return ProcessTextResponse(cleaned_text="")
 
+    cleaned = raw
+    error = None
     try:
         if req.use_local_llm and state._models_state.get("llm"):
             llm = state._llm_ref[0]
             loop = asyncio.get_event_loop()
-            cleaned = await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 loop.run_in_executor(None, _run_local, llm, system_prompt, raw),
                 timeout=15.0,
             )
+            cleaned = result if result else raw
         else:
             groq_key = _load_groq_key()
             if not groq_key:
                 return ProcessTextResponse(cleaned_text=raw, error="no groq key")
             loop = asyncio.get_event_loop()
-            cleaned = await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 loop.run_in_executor(None, _run_groq, groq_key, system_prompt, raw),
                 timeout=15.0,
             )
-        return ProcessTextResponse(cleaned_text=cleaned if cleaned else raw)
+            cleaned = result if result else raw
     except Exception as e:
-        return ProcessTextResponse(cleaned_text=raw, error=str(e))
+        error = str(e)
+
+    _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name)
+    return ProcessTextResponse(cleaned_text=cleaned, error=error)
 
 
 def _run_local(llm, system_prompt: str, raw: str) -> str:
@@ -66,7 +73,6 @@ def _run_groq(api_key: str, system_prompt: str, raw: str) -> str:
 
 
 def _load_groq_key() -> str:
-    import os
     data_dir = os.path.join(os.path.expanduser("~"), ".vox", "data")
     key_path = os.path.join(data_dir, "groq_key.txt")
     try:
@@ -74,3 +80,30 @@ def _load_groq_key() -> str:
             return f.read().strip()
     except FileNotFoundError:
         return ""
+
+
+def _append_passive_log(data_dir: str, raw: str, cleaned: str, executable_name: str) -> None:
+    import json
+    from datetime import datetime, timezone
+    settings_path = os.path.join(data_dir, "settings.json")
+    try:
+        with open(settings_path) as f:
+            if not json.load(f).get("passive_collection_enabled", False):
+                return
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+
+    from models.prompt_router import get_profile
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "raw_asr": raw,
+        "user_edited": cleaned,
+        "profile": get_profile(executable_name),
+    }
+    log_path = os.path.join(data_dir, "passive_log.jsonl")
+    os.makedirs(data_dir, exist_ok=True)
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
