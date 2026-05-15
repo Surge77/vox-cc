@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "identifier": "com.vox.app",
   "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -17,7 +19,7 @@
         "skipTaskbar": true,
         "visible": false,
         "width": 420,
-        "height": 120,
+        "height": 64,
         "resizable": false
       }
     ],
@@ -29,7 +31,7 @@
     "active": true,
     "targets": "nsis",
     "icon": ["icons/icon.ico"],
-    "externalBin": ["binaries/sidecar"],
+    "externalBin": ["../sidecar/dist/sidecar/sidecar"],
     "windows": {
       "digestAlgorithm": "sha256",
       "certificateThumbprint": null,

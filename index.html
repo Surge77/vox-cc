@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vox</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      /* color-scheme: light prevents Edge WebView2 from applying a dark default background
+         that overrides CSS transparent — without this the window shows a dark rectangle */
+      :root { color-scheme: light; }
+      html, body, #root {
+        background: rgba(0,0,0,0) !important;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

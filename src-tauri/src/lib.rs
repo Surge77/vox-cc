@@ -18,6 +18,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::context::get_focused_context,
             commands::inject::inject_text,
+            commands::windows::hide_main_window,
             commands::windows::open_settings_window,
             commands::windows::open_finetune_window,
         ])
@@ -36,7 +37,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let y = ms.height as i32 - ws.height as i32 - 80;
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
-    let _ = window.show();
+    // Do NOT show window here — stays hidden until hotkey pressed
 
     // Spawn sidecar + start health polling + crash monitor
     let handle = app.handle().clone();
@@ -63,9 +64,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "CommandOrControl+Shift+Space",
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
+                    println!("[vox] hotkey: PRESSED — showing window");
+                    if let Some(w) = handle2.get_webview_window("main") {
+                        match w.show() {
+                            Ok(_) => println!("[vox] hotkey: w.show() OK"),
+                            Err(e) => println!("[vox] hotkey: w.show() FAILED: {e}"),
+                        }
+                        let _ = w.set_focus();
+                    } else {
+                        println!("[vox] hotkey: get_webview_window('main') returned None!");
+                    }
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {
+                    println!("[vox] hotkey: RELEASED");
                     handle2.emit("hotkey-released", ()).ok();
                 }
             },
@@ -74,9 +86,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // System tray
     let open_item = MenuItemBuilder::with_id("open_settings", "Settings").build(app)?;
+    let devtools_item = MenuItemBuilder::with_id("devtools", "Debug: Open DevTools").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "Quit Vox").build(app)?;
     let menu = MenuBuilder::new(app)
-        .items(&[&open_item, &quit_item])
+        .items(&[&open_item, &devtools_item, &quit_item])
         .build()?;
 
     let app_handle = app.handle().clone();
@@ -93,6 +106,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "open_settings" => {
                 if let Err(e) = commands::windows::open_settings_window_inner(&app_handle) {
                     eprintln!("Settings window error: {e}");
+                }
+            }
+            "devtools" => {
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.show();
+                    w.open_devtools();
                 }
             }
             "quit" => {

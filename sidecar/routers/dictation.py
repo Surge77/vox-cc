@@ -144,6 +144,16 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
             if not session.is_active():
                 # stop_capture() was called while we were reading — discard chunk, exit
                 break
+
+            # Send audio level for reactive waveform visualization.
+            # Each chunk is ~64ms at 16kHz. Scale so typical speech (RMS 0.02-0.12) maps to 0.16-0.96.
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            level = min(1.0, rms * 8.0)
+            try:
+                await ws.send_json({"type": "audio_level", "level": level})
+            except Exception:
+                pass
+
             accumulator.append(chunk)
             accumulated += len(chunk)
 

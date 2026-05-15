@@ -37,6 +37,15 @@ pub fn open_finetune_window_inner(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 #[tauri::command]
+pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("main") {
+        w.hide().map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
 pub fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     open_settings_window_inner(&app)
 }
