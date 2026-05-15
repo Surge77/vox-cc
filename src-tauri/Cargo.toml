@@ -1,0 +1,47 @@
+[package]
+name = "vox"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "vox"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+dirs = "5.0"
+uiautomation = "0.3.7"
+enigo = "0.2.1"
+arboard = "3.4.0"
+windows = { version = "0.52.0", features = [
+    "Win32_UI_Accessibility",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
