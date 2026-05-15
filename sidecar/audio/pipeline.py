@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 from audio.capture import AudioCapture, SAMPLE_RATE
-from audio.vad import should_transcribe, is_hallucination, suppress_noise, SILENCE_RMS_THRESHOLD
+from audio.vad import should_transcribe, is_hallucination, suppress_noise, apply_agc
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +68,9 @@ class DictationSession:
         """
         Process one audio chunk. Returns True if session should auto-terminate (60s cap).
         Ring always stores every chunk so distil final pass gets complete session audio.
-        Turbo transcription is skipped on silent chunks (RMS gate) to avoid hallucinations.
+        Flow: AGC → Silero VAD gate → noise suppress → Whisper Turbo.
         """
-        # Always store in ring — distil needs the full session, not just voiced chunks
+        # Always store raw audio in ring — distil needs the full session
         overlap = self._ring[-1][-OVERLAP_SAMPLES:] if self._ring else np.array([], dtype=np.float32)
         self._ring.append(chunk)
 
@@ -78,16 +78,19 @@ class DictationSession:
         if total >= MAX_SAMPLES:
             return True
 
-        # Skip Turbo on silent chunks
-        if not should_transcribe(chunk):
+        # AGC: normalize gain so quiet mics aren't dropped by VAD
+        chunk_agc = apply_agc(chunk)
+
+        # Skip Turbo on silent/non-speech chunks (Silero VAD)
+        if not should_transcribe(chunk_agc):
             return False
 
         turbo = self._turbo_ref[0]
         if turbo is None:
             return False
 
-        # build feed: overlap + current, then suppress noise on full feed
-        feed = np.concatenate([overlap, chunk]) if len(overlap) else chunk.copy()
+        # build feed: overlap + AGC'd current, then suppress noise on full feed
+        feed = np.concatenate([overlap, chunk_agc]) if len(overlap) else chunk_agc.copy()
         feed = suppress_noise(feed, SAMPLE_RATE)
 
         vocab_prompt = load_vocabulary_prompt()

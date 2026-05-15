@@ -125,7 +125,7 @@ class AudioCapture:
             if dev_idx is not None:
                 base_kwargs["input_device_index"] = dev_idx
 
-            for fmt, is_int16 in [(pyaudio.paInt16, True), (pyaudio.paFloat32, False)]:
+            for fmt, is_int16 in [(pyaudio.paFloat32, False), (pyaudio.paInt16, True)]:
                 try:
                     self._stream = self._pa.open(format=fmt, **base_kwargs)
                     self._native_rate = native_rate
