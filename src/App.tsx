@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -195,7 +194,6 @@ const PILL: React.CSSProperties = {
   background: "rgba(10, 10, 10, 0.93)",
   borderRadius: 28,
   border: "1px solid rgba(255,255,255,0.07)",
-  boxShadow: "0 8px 32px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.05)",
   color: "#fff",
   fontFamily: "system-ui, -apple-system, sans-serif",
   fontSize: 14,
@@ -389,22 +387,10 @@ function useWebSocket(
   return { wsRef, beginStream, terminateStream, cancelStream };
 }
 
-// ── Window helpers ────────────────────────────────────────────────────────────
-// Show is handled by Rust (hotkey handler calls w.show() before emitting event).
-// Hide goes through a Tauri command — no frontend capability permission needed.
-
-function showWindow() {
-  getCurrentWindow().show()
-    .then(() => { getCurrentWindow().setFocus(); })
-    .then(() => console.log("[vox] window: shown"))
-    .catch((e) => console.log("[vox] window: show failed:", e));
-}
-
-function hideWindow() {
-  invoke("hide_main_window")
-    .then(() => console.log("[vox] window: hidden"))
-    .catch((e) => console.log("[vox] window: hide failed:", e));
-}
+// Window show/hide is managed entirely by Rust:
+//   hotkey PRESSED  → Rust calls w.show() + w.set_focus() before emitting event
+//   hotkey RELEASED → Rust calls w.hide() before emitting event
+// React never touches window visibility — eliminates async JS/Rust show-hide race.
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -412,10 +398,6 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, { status: "waiting_for_models" });
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
-
-  // Tracks whether the hotkey is currently held — prevents hide effect from
-  // closing the window mid-hold if models-ready fires while key is down
-  const hotkeyHeldRef = useRef(false);
 
   // Refs for real-time audio level animation (no React re-renders)
   const barsRef = useRef<Array<HTMLDivElement | null>>(new Array(NUM_BARS).fill(null));
@@ -473,45 +455,36 @@ export default function App() {
     const reg = async () => {
       cleanups.push(
         await listen<null>("hotkey-pressed", () => {
-          hotkeyHeldRef.current = true;
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-pressed (state=${s})`);
           if (s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-pressed: cancelling");
             cancelStream();
             dispatch({ type: "CANCEL_RECORDING" });
-            hideWindow();
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
             levelRef.current = 0;
             lastLevelTimeRef.current = 0;
             smoothedRef.current = 0;
-            showWindow();
             beginStream();
             dispatch({ type: "START_RECORDING" });
           } else {
-            // waiting_for_models / degraded — show feedback pill
-            console.log(`[vox] hotkey-pressed: not ready (state=${s}), showing feedback pill`);
-            showWindow();
+            // waiting_for_models / degraded — window shown by Rust, no state change
+            console.log(`[vox] hotkey-pressed: not ready (state=${s}), Rust showing window`);
           }
         })
       );
 
       cleanups.push(
         await listen<null>("hotkey-released", () => {
-          hotkeyHeldRef.current = false;
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
           if (s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-released: terminating stream");
             terminateStream();
             dispatch({ type: "STOP_RECORDING" });
-            hideWindow();
-          } else if (s === "waiting_for_models" || s === "degraded") {
-            console.log("[vox] hotkey-released: hiding feedback pill");
-            hideWindow();
           } else {
-            console.log(`[vox] hotkey-released: ignored (state=${s})`);
+            console.log(`[vox] hotkey-released: no stream to stop (state=${s})`);
           }
         })
       );
@@ -559,14 +532,6 @@ export default function App() {
     if (state.status === "error") {
       const id = setTimeout(() => dispatch({ type: "RESET" }), 4000);
       return () => clearTimeout(id);
-    }
-  }, [state.status]);
-
-  // Hide window when leaving active states, unless hotkey is still held
-  useEffect(() => {
-    const visibleStates = ["recording", "streaming"];
-    if (!visibleStates.includes(state.status) && !hotkeyHeldRef.current) {
-      hideWindow();
     }
   }, [state.status]);
 

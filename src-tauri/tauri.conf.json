@@ -19,7 +19,7 @@
         "skipTaskbar": true,
         "visible": false,
         "width": 420,
-        "height": 64,
+        "height": 56,
         "resizable": false
       }
     ],
