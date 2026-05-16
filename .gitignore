@@ -54,3 +54,13 @@ desktop.ini
 # Local agent/crash artifacts
 .claude/
 *.stackdump
+**/CLAUDE.md
+
+# Local preview/prototype pages
+*loader*.html
+stt-capsule-loaders.html
+waveform-loader-capsules.html
+
+# Generated/local diagnostics
+src-tauri/gen/
+sidecar/test_mic.py
