@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -210,12 +211,24 @@ function OverlayCard({
   state: AppState;
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
-  // Window is hidden for all these states — render nothing so no flash on show/hide
-  if (
-    state.status === "idle" ||
-    state.status === "waiting_for_models" ||
-    state.status === "degraded"
-  ) return null;
+  if (state.status === "idle") return null;
+
+  if (state.status === "waiting_for_models") {
+    return (
+      <div style={PILL}>
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fbbf24", flexShrink: 0 }} />
+        <span style={{ color: "#94a3b8" }}>Vox is starting...</span>
+      </div>
+    );
+  }
+
+  if (state.status === "degraded") {
+    return (
+      <div style={{ ...PILL, borderColor: "rgba(239,68,68,0.25)" }}>
+        <span style={{ color: "#f87171" }}>Degraded</span>
+      </div>
+    );
+  }
 
   if (state.status === "recording") {
     return (
@@ -349,20 +362,29 @@ function useWebSocket(
     };
   }, [connect]);
 
+  const sendWs = useCallback((msg: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    } else {
+      console.log("[vox] ws: not open (readyState=" + ws?.readyState + "), message dropped:", msg);
+    }
+  }, []);
+
   const beginStream = useCallback(() => {
     console.log("[vox] ws: sending begin_stream");
-    wsRef.current?.send(JSON.stringify({ command: "begin_stream" }));
-  }, []);
+    sendWs(JSON.stringify({ command: "begin_stream" }));
+  }, [sendWs]);
 
   const terminateStream = useCallback(() => {
     console.log("[vox] ws: sending terminate_stream");
-    wsRef.current?.send(JSON.stringify({ command: "terminate_stream" }));
-  }, []);
+    sendWs(JSON.stringify({ command: "terminate_stream" }));
+  }, [sendWs]);
 
   const cancelStream = useCallback(() => {
     console.log("[vox] ws: sending cancel_stream");
-    wsRef.current?.send(JSON.stringify({ command: "cancel_stream" }));
-  }, []);
+    sendWs(JSON.stringify({ command: "cancel_stream" }));
+  }, [sendWs]);
 
   return { wsRef, beginStream, terminateStream, cancelStream };
 }
@@ -370,6 +392,13 @@ function useWebSocket(
 // ── Window helpers ────────────────────────────────────────────────────────────
 // Show is handled by Rust (hotkey handler calls w.show() before emitting event).
 // Hide goes through a Tauri command — no frontend capability permission needed.
+
+function showWindow() {
+  getCurrentWindow().show()
+    .then(() => { getCurrentWindow().setFocus(); })
+    .then(() => console.log("[vox] window: shown"))
+    .catch((e) => console.log("[vox] window: show failed:", e));
+}
 
 function hideWindow() {
   invoke("hide_main_window")
@@ -383,6 +412,10 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, { status: "waiting_for_models" });
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
+
+  // Tracks whether the hotkey is currently held — prevents hide effect from
+  // closing the window mid-hold if models-ready fires while key is down
+  const hotkeyHeldRef = useRef(false);
 
   // Refs for real-time audio level animation (no React re-renders)
   const barsRef = useRef<Array<HTMLDivElement | null>>(new Array(NUM_BARS).fill(null));
@@ -440,6 +473,7 @@ export default function App() {
     const reg = async () => {
       cleanups.push(
         await listen<null>("hotkey-pressed", () => {
+          hotkeyHeldRef.current = true;
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-pressed (state=${s})`);
           if (s === "recording" || s === "streaming") {
@@ -449,27 +483,32 @@ export default function App() {
             hideWindow();
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
-            // Reset audio level refs for fresh session
             levelRef.current = 0;
             lastLevelTimeRef.current = 0;
             smoothedRef.current = 0;
-            // Window already shown by Rust before this event fires
+            showWindow();
             beginStream();
             dispatch({ type: "START_RECORDING" });
           } else {
-            console.log(`[vox] hotkey-pressed: ignored (state=${s})`);
+            // waiting_for_models / degraded — show feedback pill
+            console.log(`[vox] hotkey-pressed: not ready (state=${s}), showing feedback pill`);
+            showWindow();
           }
         })
       );
 
       cleanups.push(
         await listen<null>("hotkey-released", () => {
+          hotkeyHeldRef.current = false;
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
           if (s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-released: terminating stream");
             terminateStream();
             dispatch({ type: "STOP_RECORDING" });
+            hideWindow();
+          } else if (s === "waiting_for_models" || s === "degraded") {
+            console.log("[vox] hotkey-released: hiding feedback pill");
             hideWindow();
           } else {
             console.log(`[vox] hotkey-released: ignored (state=${s})`);
@@ -523,11 +562,19 @@ export default function App() {
     }
   }, [state.status]);
 
-  // Window only visible during recording/processing — hide for everything else
+  // Hide window when leaving active states, unless hotkey is still held
   useEffect(() => {
-    const hiddenStates = ["idle", "waiting_for_models", "degraded"];
-    if (hiddenStates.includes(state.status)) {
+    const visibleStates = ["recording", "streaming"];
+    if (!visibleStates.includes(state.status) && !hotkeyHeldRef.current) {
       hideWindow();
+    }
+  }, [state.status]);
+
+  // Finalizing timeout: if sidecar never sends handoff_ready, reset after 35s
+  useEffect(() => {
+    if (state.status === "finalizing") {
+      const id = setTimeout(() => dispatch({ type: "RESET" }), 35_000);
+      return () => clearTimeout(id);
     }
   }, [state.status]);
 

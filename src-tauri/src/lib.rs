@@ -64,16 +64,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "CommandOrControl+Shift+Space",
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
-                    println!("[vox] hotkey: PRESSED — showing window");
-                    if let Some(w) = handle2.get_webview_window("main") {
-                        match w.show() {
-                            Ok(_) => println!("[vox] hotkey: w.show() OK"),
-                            Err(e) => println!("[vox] hotkey: w.show() FAILED: {e}"),
-                        }
-                        let _ = w.set_focus();
-                    } else {
-                        println!("[vox] hotkey: get_webview_window('main') returned None!");
-                    }
+                    println!("[vox] hotkey: PRESSED");
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {
