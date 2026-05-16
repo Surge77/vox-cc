@@ -18,6 +18,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::context::get_focused_context,
             commands::inject::inject_text,
+            commands::windows::position_overlay,
             commands::windows::hide_main_window,
             commands::windows::open_settings_window,
             commands::windows::open_finetune_window,
@@ -28,16 +29,34 @@ pub fn run() {
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Position main window at bottom center of primary monitor
     let window = app.get_webview_window("main").expect("main window missing");
-    if let Some(monitor) = window.primary_monitor().ok().flatten() {
-        let ms = monitor.size();
-        let ws = window.outer_size().unwrap_or_default();
-        let x = (ms.width as i32 - ws.width as i32) / 2;
-        let y = ms.height as i32 - ws.height as i32 - 80;
-        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+
+    // Disable DWM shadow and transitions via raw FFI (avoids windows crate version conflicts).
+    {
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: *mut core::ffi::c_void,
+                dwattr: u32,
+                pvattr: *const core::ffi::c_void,
+                cbattr: u32,
+            ) -> i32;
+        }
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe {
+                let policy: u32 = 1; // DWMNCRP_DISABLED
+                DwmSetWindowAttribute(hwnd.0, 2, std::ptr::addr_of!(policy) as *const _, 4);
+                let no_anim: u32 = 1; // DWMWA_TRANSITIONS_FORCEDISABLED
+                DwmSetWindowAttribute(hwnd.0, 3, std::ptr::addr_of!(no_anim) as *const _, 4);
+            }
+        }
     }
-    // Do NOT show window here — stays hidden until hotkey pressed
+
+    // Park the window off-screen and show it once. We never hide/show again — only
+    // set_position() moves it. This avoids the Windows transparent-window show-flash
+    // (show() triggers a compositing cycle before WebView2 has rendered its first frame,
+    // causing a brief rectangle artifact). set_position() is atomic with no such flash.
+    let _ = window.set_position(tauri::PhysicalPosition::new(-10000i32, -10000i32));
+    let _ = window.show();
 
     // Spawn sidecar + start health polling + crash monitor
     let handle = app.handle().clone();
@@ -64,17 +83,16 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "CommandOrControl+Shift+Space",
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
-                    println!("[vox] hotkey: PRESSED — showing window");
-                    if let Some(w) = handle2.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
+                    // Emit only — React renders the pill first, then calls
+                    // invoke("position_overlay") via useEffect after the browser
+                    // has painted. Window moves on-screen with content already ready.
+                    println!("[vox] hotkey: PRESSED");
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {
-                    println!("[vox] hotkey: RELEASED — hiding window");
+                    println!("[vox] hotkey: RELEASED — moving window off-screen");
                     if let Some(w) = handle2.get_webview_window("main") {
-                        let _ = w.hide();
+                        let _ = w.set_position(tauri::PhysicalPosition::new(-10000i32, -10000i32));
                     }
                     handle2.emit("hotkey-released", ()).ok();
                 }

@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Waveform Loader Capsule Preview</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #f4f1ec;
+        color: #151719;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background:
+          linear-gradient(rgba(17, 24, 32, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(17, 24, 32, 0.035) 1px, transparent 1px),
+          linear-gradient(135deg, #f7f3ee 0%, #e9edf0 48%, #f8f5f0 100%);
+        background-size: 28px 28px, 28px 28px, auto;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .page {
+        width: min(1440px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 30px 0 42px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 24px;
+      }
+
+      .title-block {
+        display: grid;
+        gap: 8px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(26px, 4vw, 48px);
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        max-width: 680px;
+        margin: 0;
+        color: #5e656d;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+
+      .hotkey-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 38px;
+        padding: 0 14px;
+        border: 1px solid rgba(16, 22, 28, 0.13);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.68);
+        box-shadow: 0 10px 30px rgba(24, 31, 38, 0.08);
+        color: #40464d;
+        font-size: 13px;
+        white-space: nowrap;
+        backdrop-filter: blur(16px);
+      }
+
+      .key {
+        min-width: 44px;
+        height: 24px;
+        display: inline-grid;
+        place-items: center;
+        padding: 0 8px;
+        border-radius: 7px;
+        background: #16191d;
+        color: #f8fafc;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .option {
+        position: relative;
+        min-height: 182px;
+        display: grid;
+        grid-template-rows: 1fr auto;
+        gap: 16px;
+        padding: 22px;
+        border: 1px solid rgba(18, 24, 32, 0.1);
+        border-radius: 8px;
+        background:
+          linear-gradient(145deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.44)),
+          var(--panel-bg, #fff);
+        box-shadow: 0 18px 44px rgba(23, 30, 38, 0.09);
+        overflow: hidden;
+      }
+
+      .option::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: var(--panel-accent, transparent);
+        opacity: 0.9;
+        pointer-events: none;
+      }
+
+      .option.selected {
+        border-color: rgba(41, 112, 255, 0.52);
+        box-shadow:
+          0 0 0 3px rgba(41, 112, 255, 0.14),
+          0 24px 60px rgba(23, 30, 38, 0.14);
+      }
+
+      .stage {
+        position: relative;
+        min-height: 104px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        background: var(--stage-bg, rgba(12, 16, 20, 0.05));
+        overflow: hidden;
+      }
+
+      .stage::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+        background-size: 20px 20px;
+        opacity: var(--grid-opacity, 0.35);
+        pointer-events: none;
+      }
+
+      .label-row {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .name {
+        min-width: 0;
+        display: grid;
+        gap: 3px;
+      }
+
+      .name strong {
+        color: #171b20;
+        font-size: 14px;
+        line-height: 1.2;
+      }
+
+      .name span {
+        color: #6a717a;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .pick {
+        flex: 0 0 auto;
+        min-width: 72px;
+        height: 34px;
+        padding: 0 12px;
+        border: 1px solid rgba(20, 27, 35, 0.14);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.66);
+        color: #1e252c;
+        cursor: pointer;
+        transition:
+          transform 140ms ease,
+          border-color 140ms ease,
+          background 140ms ease;
+      }
+
+      .pick:hover {
+        transform: translateY(-1px);
+        border-color: rgba(41, 112, 255, 0.45);
+        background: rgba(255, 255, 255, 0.9);
+      }
+
+      .selected .pick {
+        border-color: rgba(41, 112, 255, 0.5);
+        background: #1c59ff;
+        color: #fff;
+      }
+
+      .capsule {
+        --capsule-h: 54px;
+        --capsule-pad: 10px;
+        --capsule-gap: 10px;
+        position: relative;
+        z-index: 1;
+        min-width: var(--capsule-w, 222px);
+        height: var(--capsule-h);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--capsule-gap);
+        padding: 0 var(--capsule-pad);
+        border: var(--capsule-border, 1px solid rgba(255, 255, 255, 0.14));
+        border-radius: 999px;
+        background: var(--capsule-bg, #101317);
+        box-shadow: var(--capsule-shadow, 0 18px 42px rgba(0, 0, 0, 0.24));
+        color: var(--capsule-fg, #fff);
+        overflow: hidden;
+        isolation: isolate;
+        backdrop-filter: blur(var(--blur, 18px));
+      }
+
+      .capsule::before {
+        content: "";
+        position: absolute;
+        inset: 1px;
+        border-radius: inherit;
+        background: var(--capsule-sheen, transparent);
+        pointer-events: none;
+        z-index: -1;
+      }
+
+      .capsule::after {
+        content: "";
+        position: absolute;
+        inset: auto 14px 6px;
+        height: 1px;
+        border-radius: 999px;
+        background: var(--bottom-line, transparent);
+      }
+
+      .icon-btn {
+        --icon-size: 32px;
+        position: relative;
+        flex: 0 0 var(--icon-size);
+        width: var(--icon-size);
+        height: var(--icon-size);
+        display: inline-grid;
+        place-items: center;
+        border: 0;
+        border-radius: 999px;
+        background: var(--icon-bg, rgba(255, 255, 255, 0.1));
+        box-shadow: var(--icon-shadow, inset 0 0 0 1px rgba(255, 255, 255, 0.1));
+      }
+
+      .icon-btn.x::before,
+      .icon-btn.x::after {
+        content: "";
+        position: absolute;
+        width: 12px;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--x-color, currentColor);
+      }
+
+      .icon-btn.x::before {
+        transform: rotate(45deg);
+      }
+
+      .icon-btn.x::after {
+        transform: rotate(-45deg);
+      }
+
+      .icon-btn.check::before {
+        content: "";
+        width: 13px;
+        height: 8px;
+        border-left: 2px solid var(--check-color, currentColor);
+        border-bottom: 2px solid var(--check-color, currentColor);
+        transform: translateY(-1px) rotate(-45deg);
+      }
+
+      .wave {
+        --bar-count: 9;
+        flex: 1 1 auto;
+        height: var(--wave-h, 28px);
+        min-width: var(--wave-w, 92px);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--bar-gap, 4px);
+      }
+
+      .bar {
+        width: var(--bar-w, 4px);
+        height: calc(var(--base-h, 9px) + var(--boost, 18px) * var(--level));
+        border-radius: 999px;
+        background: var(--bar-bg, #60a5fa);
+        box-shadow: var(--bar-shadow, none);
+        transform-origin: center;
+        animation:
+          wave-rise var(--speed, 880ms) cubic-bezier(0.45, 0, 0.2, 1) infinite alternate,
+          wave-glow calc(var(--speed, 880ms) * 2.2) ease-in-out infinite;
+        animation-delay: calc(var(--i) * var(--stagger, -72ms));
+      }
+
+      .bar:nth-child(1) { --level: 0.22; }
+      .bar:nth-child(2) { --level: 0.46; }
+      .bar:nth-child(3) { --level: 0.72; }
+      .bar:nth-child(4) { --level: 0.96; }
+      .bar:nth-child(5) { --level: 0.82; }
+      .bar:nth-child(6) { --level: 0.58; }
+      .bar:nth-child(7) { --level: 0.78; }
+      .bar:nth-child(8) { --level: 0.4; }
+      .bar:nth-child(9) { --level: 0.25; }
+      .bar:nth-child(10) { --level: 0.52; }
+      .bar:nth-child(11) { --level: 0.88; }
+
+      @keyframes wave-rise {
+        0% {
+          height: calc(var(--base-h, 9px) + var(--boost, 18px) * var(--level) * 0.35);
+          opacity: 0.72;
+        }
+        100% {
+          height: calc(var(--base-h, 9px) + var(--boost, 18px) * var(--level));
+          opacity: 1;
+        }
+      }
+
+      @keyframes wave-glow {
+        50% {
+          filter: brightness(1.2);
+        }
+      }
+
+      @keyframes capsule-breathe {
+        50% {
+          transform: translateY(-1px) scale(1.018);
+        }
+      }
+
+      @keyframes scan {
+        0% {
+          transform: translateX(-160%);
+        }
+        100% {
+          transform: translateX(160%);
+        }
+      }
+
+      .active .capsule {
+        animation: capsule-breathe 1.7s ease-in-out infinite;
+      }
+
+      .v1 {
+        --stage-bg: linear-gradient(145deg, #0f1217, #252a31);
+        --capsule-bg: rgba(10, 12, 15, 0.88);
+        --capsule-shadow: 0 24px 56px rgba(4, 7, 11, 0.46);
+        --bar-bg: linear-gradient(180deg, #b7dcff, #4f9cff);
+        --icon-bg: rgba(255, 255, 255, 0.08);
+        --capsule-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 58%);
+      }
+
+      .v2 {
+        --stage-bg: linear-gradient(145deg, #eef5f5, #d7e3e1);
+        --capsule-bg: rgba(255, 255, 255, 0.82);
+        --capsule-fg: #1d2329;
+        --capsule-border: 1px solid rgba(43, 54, 62, 0.12);
+        --capsule-shadow: 0 20px 42px rgba(41, 52, 61, 0.18);
+        --bar-bg: linear-gradient(180deg, #111a22, #65707a);
+        --icon-bg: rgba(20, 28, 36, 0.07);
+        --bottom-line: rgba(255, 255, 255, 0.76);
+      }
+
+      .v3 {
+        --stage-bg: linear-gradient(145deg, #11151f, #202b3e);
+        --capsule-bg: linear-gradient(135deg, rgba(20, 33, 55, 0.96), rgba(5, 9, 17, 0.94));
+        --bar-bg: linear-gradient(180deg, #9ee5ff, #4f63ff);
+        --bar-shadow: 0 0 16px rgba(73, 128, 255, 0.42);
+        --icon-bg: rgba(121, 166, 255, 0.12);
+        --x-color: #c8d7ff;
+        --check-color: #b9f6d8;
+      }
+
+      .v4 {
+        --stage-bg: linear-gradient(145deg, #1d1716, #34201f 52%, #4a2e25);
+        --capsule-bg: rgba(32, 18, 15, 0.88);
+        --bar-bg: linear-gradient(180deg, #ffe2a6, #ff805d);
+        --bar-shadow: 0 0 18px rgba(255, 136, 83, 0.44);
+        --icon-bg: rgba(255, 226, 166, 0.11);
+        --capsule-border: 1px solid rgba(255, 218, 170, 0.18);
+        --capsule-shadow: 0 24px 60px rgba(70, 28, 18, 0.42);
+      }
+
+      .v5 {
+        --stage-bg: linear-gradient(145deg, #11201b, #1f3a32);
+        --capsule-bg: rgba(7, 24, 19, 0.9);
+        --bar-bg: linear-gradient(180deg, #d9fff1, #45e0aa);
+        --bar-shadow: 0 0 18px rgba(69, 224, 170, 0.38);
+        --icon-bg: rgba(217, 255, 241, 0.1);
+        --capsule-border: 1px solid rgba(108, 255, 203, 0.18);
+      }
+
+      .v6 {
+        --stage-bg: linear-gradient(145deg, #f3f0e9, #d9d0c3);
+        --capsule-w: 198px;
+        --capsule-h: 48px;
+        --capsule-bg: #171818;
+        --bar-bg: #f6efe4;
+        --icon-bg: rgba(246, 239, 228, 0.08);
+        --bar-w: 3px;
+        --bar-gap: 3px;
+        --boost: 15px;
+        --capsule-shadow: 0 18px 44px rgba(14, 14, 13, 0.28);
+      }
+
+      .v7 {
+        --stage-bg: radial-gradient(circle at center, #fdfaf5, #eadfd0);
+        --capsule-bg: rgba(253, 250, 245, 0.9);
+        --capsule-fg: #24312e;
+        --capsule-border: 1px solid rgba(74, 90, 84, 0.14);
+        --bar-bg: linear-gradient(180deg, #167769, #1bb7a1);
+        --icon-bg: rgba(22, 119, 105, 0.08);
+        --x-color: #75817d;
+        --check-color: #0c7d66;
+      }
+
+      .v8 {
+        --stage-bg: linear-gradient(145deg, #111318, #292f36);
+        --capsule-bg: rgba(245, 248, 250, 0.12);
+        --capsule-border: 1px solid rgba(255, 255, 255, 0.18);
+        --capsule-shadow: 0 20px 54px rgba(0, 0, 0, 0.38);
+        --bar-bg: linear-gradient(180deg, #ffffff, #d3dbe4);
+        --icon-bg: rgba(255, 255, 255, 0.12);
+        --blur: 28px;
+      }
+
+      .v9 {
+        --stage-bg: linear-gradient(145deg, #18202c, #242536 50%, #352537);
+        --capsule-bg: linear-gradient(135deg, rgba(28, 34, 49, 0.94), rgba(39, 30, 50, 0.92));
+        --bar-bg: linear-gradient(180deg, #e7cdff, #62d8ff);
+        --bar-shadow: 0 0 20px rgba(135, 212, 255, 0.35);
+        --icon-bg: rgba(231, 205, 255, 0.1);
+      }
+
+      .v10 {
+        --stage-bg: linear-gradient(145deg, #f0f5ff, #dde8f6);
+        --capsule-w: 238px;
+        --capsule-bg: #f8fbff;
+        --capsule-fg: #151d27;
+        --capsule-border: 1px solid rgba(46, 72, 96, 0.12);
+        --capsule-shadow: 0 22px 48px rgba(60, 90, 120, 0.2);
+        --bar-bg: linear-gradient(180deg, #1e74ff, #1aa6b8);
+        --icon-bg: rgba(30, 116, 255, 0.08);
+        --x-color: #657181;
+        --check-color: #176f5d;
+      }
+
+      .v11 {
+        --stage-bg: linear-gradient(145deg, #17100f, #2a1517);
+        --capsule-bg: rgba(18, 10, 12, 0.9);
+        --bar-bg: linear-gradient(180deg, #ffccd8, #ff386f);
+        --bar-shadow: 0 0 20px rgba(255, 56, 111, 0.38);
+        --icon-bg: rgba(255, 204, 216, 0.1);
+        --capsule-border: 1px solid rgba(255, 128, 158, 0.19);
+      }
+
+      .v12 {
+        --stage-bg: linear-gradient(145deg, #eef0ec, #cfd8d0);
+        --capsule-w: 190px;
+        --capsule-h: 46px;
+        --capsule-bg: #0f1512;
+        --capsule-pad: 8px;
+        --capsule-gap: 8px;
+        --icon-size: 28px;
+        --bar-w: 5px;
+        --bar-gap: 2px;
+        --boost: 16px;
+        --bar-bg: linear-gradient(180deg, #b6ffd6, #33d17a);
+      }
+
+      .v13 {
+        --stage-bg: linear-gradient(145deg, #10141a, #202833);
+        --capsule-w: 250px;
+        --capsule-bg: rgba(8, 11, 16, 0.82);
+        --capsule-border: 1px solid rgba(255, 255, 255, 0.1);
+        --bar-bg: linear-gradient(180deg, #d6efff, #85c7ff);
+        --bar-w: 2px;
+        --bar-gap: 5px;
+        --boost: 22px;
+        --speed: 620ms;
+        --icon-bg: rgba(255, 255, 255, 0.07);
+      }
+
+      .v14 {
+        --stage-bg: linear-gradient(145deg, #262724, #4c5149);
+        --capsule-bg: rgba(246, 247, 239, 0.88);
+        --capsule-fg: #121512;
+        --capsule-border: 1px solid rgba(17, 23, 18, 0.13);
+        --capsule-shadow: 0 24px 52px rgba(34, 38, 33, 0.22);
+        --bar-bg: linear-gradient(180deg, #415247, #95aa8d);
+        --icon-bg: rgba(65, 82, 71, 0.08);
+        --x-color: #637165;
+        --check-color: #345d42;
+      }
+
+      .v15 {
+        --stage-bg: linear-gradient(145deg, #111315, #1d2630 48%, #163229);
+        --capsule-w: 262px;
+        --capsule-bg: linear-gradient(135deg, rgba(11, 15, 19, 0.92), rgba(13, 31, 26, 0.9));
+        --capsule-border: 1px solid rgba(121, 255, 197, 0.14);
+        --capsule-shadow: 0 26px 64px rgba(6, 12, 15, 0.46);
+        --bar-bg: linear-gradient(180deg, #ebfff5, #8dffc6 44%, #3fb7ff);
+        --bar-shadow: 0 0 22px rgba(107, 231, 196, 0.35);
+        --bar-gap: 3px;
+        --speed: 720ms;
+        --icon-bg: rgba(141, 255, 198, 0.09);
+      }
+
+      .scan-line {
+        position: absolute;
+        inset: 0 auto 0 0;
+        display: none;
+        width: 42%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+        animation: scan 2.4s ease-in-out infinite;
+        pointer-events: none;
+      }
+
+      .v3 .scan-line,
+      .v9 .scan-line,
+      .v15 .scan-line {
+        display: block;
+      }
+
+      .hotkey-preview {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        background: rgba(9, 13, 18, 0.18);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease;
+        backdrop-filter: blur(5px);
+      }
+
+      .hotkey-preview.visible {
+        opacity: 1;
+      }
+
+      .hotkey-preview .capsule {
+        transform: scale(1.12);
+      }
+
+      @media (max-width: 980px) {
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .topbar {
+          align-items: start;
+          flex-direction: column;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .page {
+          width: min(100% - 24px, 560px);
+          padding-top: 20px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .option {
+          padding: 16px;
+        }
+
+        .capsule {
+          min-width: min(var(--capsule-w, 222px), 100%);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 1ms !important;
+          animation-iteration-count: 1 !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="title-block">
+          <h1>Waveform capsule loader set</h1>
+          <p class="subtitle">
+            Fifteen compact dictation bar directions for the hotkey overlay, with cancel, live waveform, and done affordances.
+          </p>
+        </div>
+        <div class="hotkey-chip" aria-live="polite">
+          <span class="key">Space</span>
+          <span>preview selected capsule</span>
+        </div>
+      </header>
+
+      <section class="grid" aria-label="Waveform capsule loader options">
+        <article class="option selected active v1" data-name="Classic Flow" data-variant="v1">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Classic Flow</strong><span>Black glass, blue activity bars</span></div>
+            <button class="pick" type="button">Selected</button>
+          </div>
+        </article>
+
+        <article class="option active v2" data-name="Pearl Compact" data-variant="v2">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Pearl Compact</strong><span>Light frosted capsule</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v3" data-name="Command Blue" data-variant="v3">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Command Blue</strong><span>Deep utility surface</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v4" data-name="Ember Voice" data-variant="v4">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Ember Voice</strong><span>Warm high-contrast signal</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v5" data-name="Mint Signal" data-variant="v5">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Mint Signal</strong><span>Calm listening state</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v6" data-name="Mono Minimal" data-variant="v6">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Mono Minimal</strong><span>Small, quiet desktop pill</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v7" data-name="Porcelain Green" data-variant="v7">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Porcelain Green</strong><span>Bright shell, focused accent</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v8" data-name="Smoke Glass" data-variant="v8">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Smoke Glass</strong><span>Transparent floating material</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v9" data-name="Prism Night" data-variant="v9">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Prism Night</strong><span>Cool command-mode energy</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v10" data-name="Ice Console" data-variant="v10">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Ice Console</strong><span>Clean white system overlay</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v11" data-name="Ruby Focus" data-variant="v11">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Ruby Focus</strong><span>High urgency voice state</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v12" data-name="Dense Meter" data-variant="v12">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Dense Meter</strong><span>Compact stronger EQ reads</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v13" data-name="Needle Bars" data-variant="v13">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Needle Bars</strong><span>Thin precise audio trace</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v14" data-name="Sage Shell" data-variant="v14">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Sage Shell</strong><span>Soft native app feel</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+
+        <article class="option active v15" data-name="Duotone Live" data-variant="v15">
+          <div class="stage"></div>
+          <div class="label-row">
+            <div class="name"><strong>Duotone Live</strong><span>Premium luminous waveform</span></div>
+            <button class="pick" type="button">Select</button>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <div class="hotkey-preview" aria-hidden="true"></div>
+
+    <template id="capsule-template">
+      <div class="capsule" role="img" aria-label="Animated waveform loader capsule">
+        <button class="icon-btn x" type="button" aria-label="Cancel"></button>
+        <div class="wave" aria-hidden="true">
+          <span class="bar" style="--i: 0"></span>
+          <span class="bar" style="--i: 1"></span>
+          <span class="bar" style="--i: 2"></span>
+          <span class="bar" style="--i: 3"></span>
+          <span class="bar" style="--i: 4"></span>
+          <span class="bar" style="--i: 5"></span>
+          <span class="bar" style="--i: 6"></span>
+          <span class="bar" style="--i: 7"></span>
+          <span class="bar" style="--i: 8"></span>
+          <span class="bar" style="--i: 9"></span>
+          <span class="bar" style="--i: 10"></span>
+        </div>
+        <button class="icon-btn check" type="button" aria-label="Done"></button>
+        <span class="scan-line" aria-hidden="true"></span>
+      </div>
+    </template>
+
+    <script>
+      const template = document.querySelector("#capsule-template");
+      const options = [...document.querySelectorAll(".option")];
+      const preview = document.querySelector(".hotkey-preview");
+      let selected = document.querySelector(".option.selected");
+
+      function addCapsule(option) {
+        const stage = option.querySelector(".stage");
+        const capsule = template.content.firstElementChild.cloneNode(true);
+        stage.append(capsule);
+      }
+
+      function setSelected(option) {
+        selected?.classList.remove("selected");
+        selected?.querySelector(".pick").replaceChildren("Select");
+        selected = option;
+        selected.classList.add("selected");
+        selected.querySelector(".pick").replaceChildren("Selected");
+        preview.replaceChildren(selected.querySelector(".capsule").cloneNode(true));
+        preview.className = `hotkey-preview ${selected.dataset.variant} active`;
+      }
+
+      options.forEach((option) => {
+        addCapsule(option);
+        option.querySelector(".pick").addEventListener("click", () => setSelected(option));
+        option.addEventListener("dblclick", () => setSelected(option));
+      });
+
+      setSelected(selected);
+
+      window.addEventListener("keydown", (event) => {
+        if (event.code !== "Space" || event.repeat) return;
+        event.preventDefault();
+        preview.classList.add("visible");
+      });
+
+      window.addEventListener("keyup", (event) => {
+        if (event.code !== "Space") return;
+        preview.classList.remove("visible");
+      });
+    </script>
+  </body>
+</html>

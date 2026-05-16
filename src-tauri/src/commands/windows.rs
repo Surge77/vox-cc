@@ -37,6 +37,20 @@ pub fn open_finetune_window_inner(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 #[tauri::command]
+pub fn position_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("main") {
+        if let Ok(Some(monitor)) = w.primary_monitor() {
+            let ms = monitor.size();
+            let ws = w.outer_size().unwrap_or(tauri::PhysicalSize::new(420, 80));
+            let x = (ms.width as i32 - ws.width as i32) / 2;
+            let y = ms.height as i32 - ws.height as i32 - 80;
+            w.set_position(tauri::PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         w.hide().map_err(|e| e.to_string())

@@ -121,11 +121,11 @@ function reducer(state: AppState, action: AppAction): AppState {
 
 // ── Waveform bars (RAF-animated, real amplitude) ───────────────────────────────
 
-// Per-bar amplitude multipliers — shapes the EQ display profile
-const BAR_MULTIPLIERS = [0.45, 0.70, 0.95, 1.0, 0.90, 0.65, 0.42];
+// Pearl Compact (v2) — 11-bar EQ profile matching waveform-loader-capsules.html
+const BAR_MULTIPLIERS = [0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.40, 0.25, 0.52, 0.88];
 const NUM_BARS = BAR_MULTIPLIERS.length;
-const MIN_BAR_H = 3;  // px, minimum bar height (silence)
-const MAX_BAR_H = 22; // px, additional height at full amplitude
+const MIN_BAR_H = 7;
+const MAX_BAR_H = 16;
 
 function WaveformBars({
   barsRef,
@@ -133,19 +133,17 @@ function WaveformBars({
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 3, height: 28 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 3, height: 26, flex: "1 1 auto", justifyContent: "center", minWidth: 84 }}>
       {Array.from({ length: NUM_BARS }, (_, i) => (
         <div
           key={i}
-          ref={(el) => {
-            barsRef.current[i] = el;
-          }}
+          ref={(el) => { barsRef.current[i] = el; }}
           style={{
             width: 3,
             height: MIN_BAR_H,
-            background: "#60a5fa",
-            borderRadius: 2,
-            // No CSS animation — RAF drives height directly for real amplitude
+            background: "linear-gradient(180deg, #111a22, #65707a)",
+            borderRadius: 999,
+            flexShrink: 0,
           }}
         />
       ))}
@@ -153,19 +151,83 @@ function WaveformBars({
   );
 }
 
-// ── Pill overlay card ──────────────────────────────────────────────────────────
+// ── Pearl Compact capsule (v2 from waveform-loader-capsules.html) ──────────────
 
 const OVERLAY_STYLES = `
-  @keyframes vox-spin {
-    to { transform: rotate(360deg); }
+  @keyframes vox-spin { to { transform: rotate(360deg); } }
+  @keyframes vox-capsule-breathe { 50% { transform: translateY(-1px) scale(1.018); } }
+
+  .vox-capsule {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
   }
-  @keyframes vox-blink {
-    0%, 49% { opacity: 1; }
-    50%, 100% { opacity: 0; }
+  .vox-capsule::before {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.22), transparent 58%);
+    pointer-events: none;
+    z-index: -1;
   }
-  @keyframes vox-appear {
-    from { opacity: 1; }
-    to   { opacity: 1; }
+  .vox-capsule::after {
+    content: "";
+    position: absolute;
+    inset: auto 13px 6px;
+    height: 1px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.76);
+    pointer-events: none;
+  }
+  .vox-capsule-active { animation: vox-capsule-breathe 1.7s ease-in-out infinite; }
+
+  .vox-icon-x {
+    position: relative;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    display: inline-grid;
+    place-items: center;
+    border: none;
+    border-radius: 999px;
+    background: rgba(20, 28, 36, 0.07);
+    padding: 0;
+    cursor: default;
+  }
+  .vox-icon-x::before,
+  .vox-icon-x::after {
+    content: "";
+    position: absolute;
+    width: 11px;
+    height: 2px;
+    border-radius: 999px;
+    background: #5a6470;
+  }
+  .vox-icon-x::before { transform: rotate(45deg); }
+  .vox-icon-x::after  { transform: rotate(-45deg); }
+
+  .vox-icon-check {
+    position: relative;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    display: inline-grid;
+    place-items: center;
+    border: none;
+    border-radius: 999px;
+    background: rgba(20, 28, 36, 0.07);
+    padding: 0;
+    cursor: default;
+  }
+  .vox-icon-check::before {
+    content: "";
+    display: block;
+    width: 12px;
+    height: 7px;
+    border-left: 2px solid #1d2329;
+    border-bottom: 2px solid #1d2329;
+    transform: translateY(-1px) rotate(-45deg);
   }
 `;
 
@@ -175,8 +237,8 @@ function Spinner() {
       style={{
         width: 15,
         height: 15,
-        border: "2px solid rgba(255,255,255,0.12)",
-        borderTopColor: "#60a5fa",
+        border: "2px solid rgba(43, 54, 62, 0.15)",
+        borderTopColor: "#1d2329",
         borderRadius: "50%",
         animation: "vox-spin 0.75s linear infinite",
         flexShrink: 0,
@@ -185,20 +247,39 @@ function Spinner() {
   );
 }
 
-const PILL: React.CSSProperties = {
+const CAPSULE: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 12,
-  padding: "0 20px",
-  height: 56,
-  background: "rgba(10, 10, 10, 0.93)",
-  borderRadius: 28,
-  border: "1px solid rgba(255,255,255,0.07)",
-  color: "#fff",
+  justifyContent: "center",
+  gap: 9,
+  padding: "0 9px",
+  height: 50,
+  minWidth: 206,
+  background: "rgba(255, 255, 255, 0.82)",
+  borderRadius: 999,
+  border: "1px solid rgba(43, 54, 62, 0.12)",
+  boxShadow: "0 10px 22px rgba(41, 52, 61, 0.18)",
+  color: "#1d2329",
   fontFamily: "system-ui, -apple-system, sans-serif",
-  fontSize: 14,
-  fontWeight: 400,
+  fontSize: 13,
+  backdropFilter: "blur(18px)",
   whiteSpace: "nowrap",
+};
+
+const PEARL_PILL: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "0 16px",
+  height: 36,
+  background: "rgba(255, 255, 255, 0.82)",
+  borderRadius: 999,
+  border: "1px solid rgba(43, 54, 62, 0.12)",
+  boxShadow: "0 5px 12px rgba(41, 52, 61, 0.12)",
+  color: "#1d2329",
+  fontFamily: "system-ui, -apple-system, sans-serif",
+  fontSize: 13,
+  backdropFilter: "blur(16px)",
 };
 
 function OverlayCard({
@@ -212,74 +293,61 @@ function OverlayCard({
 
   if (state.status === "waiting_for_models") {
     return (
-      <div style={PILL}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fbbf24", flexShrink: 0 }} />
-        <span style={{ color: "#94a3b8" }}>Vox is starting...</span>
+      <div style={PEARL_PILL}>
+        <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#d97706", flexShrink: 0 }} />
+        <span style={{ color: "#5a6470" }}>Starting…</span>
       </div>
     );
   }
 
   if (state.status === "degraded") {
     return (
-      <div style={{ ...PILL, borderColor: "rgba(239,68,68,0.25)" }}>
-        <span style={{ color: "#f87171" }}>Degraded</span>
-      </div>
-    );
-  }
-
-  if (state.status === "recording") {
-    return (
-      <div style={PILL}>
-        <WaveformBars barsRef={barsRef} />
-        <span style={{ color: "#94a3b8" }}>Listening...</span>
-      </div>
-    );
-  }
-
-  if (state.status === "streaming") {
-    return (
-      <div style={{ ...PILL, maxWidth: 380 }}>
-        <WaveformBars barsRef={barsRef} />
-        <span style={{ color: "#f1f5f9", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {state.partial || "..."}
-          <span
-            style={{
-              display: "inline-block",
-              width: 2,
-              height: "1em",
-              background: "#60a5fa",
-              marginLeft: 2,
-              verticalAlign: "text-bottom",
-              animation: "vox-blink 1s step-end infinite",
-            }}
-          />
-        </span>
-      </div>
-    );
-  }
-
-  if (state.status === "finalizing") {
-    return (
-      <div style={PILL}>
-        <Spinner />
-        <span style={{ color: "#94a3b8" }}>Processing...</span>
-      </div>
-    );
-  }
-
-  if (state.status === "injecting") {
-    return (
-      <div style={PILL}>
-        <span style={{ color: "#34d399", fontSize: 16, lineHeight: 1 }}>✓</span>
-        <span style={{ color: "#94a3b8" }}>Done</span>
+      <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
+        <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", flexShrink: 0 }} />
+        <span style={{ color: "#b91c1c" }}>Degraded</span>
       </div>
     );
   }
 
   if (state.status === "error") {
     return (
-      <div style={{ ...PILL, borderColor: "rgba(239,68,68,0.25)" }}>
-        <span style={{ color: "#f87171" }}>{state.message}</span>
+      <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
+        <span style={{ color: "#b91c1c" }}>{state.message}</span>
+      </div>
+    );
+  }
+
+  if (state.status === "recording" || state.status === "streaming") {
+    return (
+      <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
+        <div className="vox-icon-x" />
+        <WaveformBars barsRef={barsRef} />
+        <div className="vox-icon-check" style={{ opacity: 0.35 }} />
+      </div>
+    );
+  }
+
+  if (state.status === "finalizing") {
+    return (
+      <div className="vox-capsule" style={CAPSULE}>
+        <div className="vox-icon-x" style={{ opacity: 0.3 }} />
+        <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, minWidth: 84 }}>
+          <Spinner />
+          <span style={{ color: "#5a6470" }}>Processing…</span>
+        </div>
+        <div className="vox-icon-check" style={{ opacity: 0.3 }} />
+      </div>
+    );
+  }
+
+  if (state.status === "injecting") {
+    return (
+      <div className="vox-capsule" style={CAPSULE}>
+        <div className="vox-icon-x" style={{ opacity: 0.3 }} />
+        <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center", minWidth: 84 }}>
+          <span style={{ color: "#5a6470" }}>Done</span>
+        </div>
+        <div className="vox-icon-check" />
       </div>
     );
   }
@@ -468,8 +536,9 @@ export default function App() {
             beginStream();
             dispatch({ type: "START_RECORDING" });
           } else {
-            // waiting_for_models / degraded — window shown by Rust, no state change
-            console.log(`[vox] hotkey-pressed: not ready (state=${s}), Rust showing window`);
+            // waiting_for_models / degraded — state content is already rendered; move on-screen
+            invoke("position_overlay").catch(console.error);
+            console.log(`[vox] hotkey-pressed: not ready (state=${s})`);
           }
         })
       );
@@ -525,6 +594,15 @@ export default function App() {
 
     return () => cleanups.forEach((fn) => fn());
   }, [beginStream, cancelStream, terminateStream]);
+
+  // Move window on-screen after React has rendered the pill (useEffect fires post-paint).
+  // Only fires for "recording" — streaming keeps it on-screen without re-invoking,
+  // and finalizing/injecting must stay off-screen to avoid fighting Rust's RELEASED handler.
+  useEffect(() => {
+    if (state.status === "recording") {
+      invoke("position_overlay").catch(console.error);
+    }
+  }, [state.status]);
 
   // ERROR auto-reset after 4s
   useEffect(() => {

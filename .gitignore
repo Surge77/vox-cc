@@ -50,3 +50,7 @@ desktop.ini
 .idea/
 *.suo
 *.user
+
+# Local agent/crash artifacts
+.claude/
+*.stackdump
