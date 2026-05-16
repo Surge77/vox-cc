@@ -164,7 +164,7 @@ const OVERLAY_STYLES = `
     50%, 100% { opacity: 0; }
   }
   @keyframes vox-appear {
-    from { opacity: 0; }
+    from { opacity: 1; }
     to   { opacity: 1; }
   }
 `;
@@ -199,7 +199,6 @@ const PILL: React.CSSProperties = {
   fontSize: 14,
   fontWeight: 400,
   whiteSpace: "nowrap",
-  animation: "vox-appear 120ms ease-out both",
 };
 
 function OverlayCard({
