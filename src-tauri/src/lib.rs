@@ -31,7 +31,7 @@ pub fn run() {
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app.get_webview_window("main").expect("main window missing");
 
-    // Disable DWM shadow and transitions via raw FFI (avoids windows crate version conflicts).
+    // Raw Win32 FFI — avoids windows crate version conflicts with Tauri internals.
     {
         extern "system" {
             fn DwmSetWindowAttribute(
@@ -40,21 +40,37 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 pvattr: *const core::ffi::c_void,
                 cbattr: u32,
             ) -> i32;
+            fn GetWindowLongW(hwnd: *mut core::ffi::c_void, n_index: i32) -> i32;
+            fn SetWindowLongW(hwnd: *mut core::ffi::c_void, n_index: i32, dw_new_long: i32) -> i32;
         }
         if let Ok(hwnd) = window.hwnd() {
             unsafe {
+                // Disable DWM NC shadow and transition animation.
                 let policy: u32 = 1; // DWMNCRP_DISABLED
                 DwmSetWindowAttribute(hwnd.0, 2, std::ptr::addr_of!(policy) as *const _, 4);
                 let no_anim: u32 = 1; // DWMWA_TRANSITIONS_FORCEDISABLED
                 DwmSetWindowAttribute(hwnd.0, 3, std::ptr::addr_of!(no_anim) as *const _, 4);
+
+                // WS_EX_NOACTIVATE: click doesn't steal keyboard focus.
+                // WS_EX_TRANSPARENT: mouse events pass through to window beneath —
+                // capsule is display-only, no interaction needed.
+                const GWL_EXSTYLE: i32 = -20;
+                const WS_EX_NOACTIVATE: i32 = 0x0800_0000;
+                const WS_EX_TRANSPARENT: i32 = 0x0000_0020;
+                let ex = GetWindowLongW(hwnd.0, GWL_EXSTYLE);
+                SetWindowLongW(hwnd.0, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT);
             }
         }
     }
 
-    // Park the window off-screen and show it once. We never hide/show again — only
-    // set_position() moves it. This avoids the Windows transparent-window show-flash
-    // (show() triggers a compositing cycle before WebView2 has rendered its first frame,
-    // causing a brief rectangle artifact). set_position() is atomic with no such flash.
+    // Capsule is display-only — all clicks must pass through to the window below.
+    // set_ignore_cursor_events propagates WS_EX_TRANSPARENT to the inner WebView2
+    // HWND, not just the outer host HWND where the manual Win32 code above runs.
+    let _ = window.set_ignore_cursor_events(true);
+
+    // Park off-screen and show once so DWM allocates compositing resources.
+    // Window stays always-visible; hotkey PRESSED moves it on-screen,
+    // hotkey RELEASED moves it back to -10000 (effectively hidden, no flash).
     let _ = window.set_position(tauri::PhysicalPosition::new(-10000i32, -10000i32));
     let _ = window.show();
 
@@ -83,17 +99,27 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "CommandOrControl+Shift+Space",
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
-                    // Emit only — React renders the pill first, then calls
-                    // invoke("position_overlay") via useEffect after the browser
-                    // has painted. Window moves on-screen with content already ready.
                     println!("[vox] hotkey: PRESSED");
+                    // Move window on-screen before emitting the event. Window is always
+                    // visible (shown at startup, never hidden), so set_position is enough —
+                    // no show/hide cycle, no WebView2 compositor reinit, no black flash.
+                    if let Some(w) = handle2.get_webview_window("main") {
+                        if let Ok(Some(monitor)) = w.primary_monitor() {
+                            let ms = monitor.size();
+                            let ws = w.outer_size()
+                                .unwrap_or(tauri::PhysicalSize::new(420, 80));
+                            let x = (ms.width as i32 - ws.width as i32) / 2;
+                            let y = ms.height as i32 - ws.height as i32 - 80;
+                            println!("[vox] hotkey: positioning at ({}, {})", x, y);
+                            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+                        }
+                    }
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {
-                    println!("[vox] hotkey: RELEASED — moving window off-screen");
-                    if let Some(w) = handle2.get_webview_window("main") {
-                        let _ = w.set_position(tauri::PhysicalPosition::new(-10000i32, -10000i32));
-                    }
+                    println!("[vox] hotkey: RELEASED");
+                    // Only emit — React parks the window to -10000 when state reaches idle
+                    // (after injection completes), so the Processing/Done UI remains visible.
                     handle2.emit("hotkey-released", ()).ok();
                 }
             },

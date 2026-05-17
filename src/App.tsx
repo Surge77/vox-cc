@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,26 @@ interface WsMessage {
   level?: number;
 }
 
+interface DeepContextPayload {
+  executable_name: string;
+  window_title: string;
+  inferred_extension: string | null;
+  text_preceding_cursor: string;
+  text_succeeding_cursor: string;
+}
+
+interface ProcessTextRequest {
+  raw_transcript: string;
+  context_string: string;
+  executable_name: string;
+  window_title: string;
+  inferred_extension: string | null;
+  text_preceding_cursor: string;
+  text_succeeding_cursor: string;
+  use_local_llm: boolean;
+  custom_vocabulary: string[];
+}
+
 // ── Port discovery ─────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 8000;
@@ -55,7 +76,9 @@ async function discoverSidecarPort(): Promise<number> {
       continue;
     }
   }
-  console.log(`[vox] port-discovery: no sidecar found, defaulting to ${DEFAULT_PORT}`);
+  console.log(
+    `[vox] port-discovery: no sidecar found, defaulting to ${DEFAULT_PORT}`,
+  );
   return DEFAULT_PORT;
 }
 
@@ -122,10 +145,12 @@ function reducer(state: AppState, action: AppAction): AppState {
 // ── Waveform bars (RAF-animated, real amplitude) ───────────────────────────────
 
 // Pearl Compact (v2) — 11-bar EQ profile matching waveform-loader-capsules.html
-const BAR_MULTIPLIERS = [0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.40, 0.25, 0.52, 0.88];
+const BAR_MULTIPLIERS = [
+  0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.4, 0.25, 0.52, 0.88,
+];
 const NUM_BARS = BAR_MULTIPLIERS.length;
-const MIN_BAR_H = 7;
-const MAX_BAR_H = 16;
+const MIN_BAR_H = 4;
+const MAX_BAR_H = 28;
 
 function WaveformBars({
   barsRef,
@@ -133,11 +158,23 @@ function WaveformBars({
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 3, height: 26, flex: "1 1 auto", justifyContent: "center", minWidth: 84 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 3,
+        height: 26,
+        flex: "1 1 auto",
+        justifyContent: "center",
+        minWidth: 84,
+      }}
+    >
       {Array.from({ length: NUM_BARS }, (_, i) => (
         <div
           key={i}
-          ref={(el) => { barsRef.current[i] = el; }}
+          ref={(el) => {
+            barsRef.current[i] = el;
+          }}
           style={{
             width: 3,
             height: MIN_BAR_H,
@@ -255,14 +292,13 @@ const CAPSULE: React.CSSProperties = {
   padding: "0 9px",
   height: 50,
   minWidth: 206,
-  background: "rgba(255, 255, 255, 0.82)",
+  background: "rgba(255, 255, 255, 0.96)",
   borderRadius: 999,
   border: "1px solid rgba(43, 54, 62, 0.12)",
-  boxShadow: "0 10px 22px rgba(41, 52, 61, 0.18)",
+  boxShadow: "0 4px 14px rgba(41, 52, 61, 0.18)",
   color: "#1d2329",
   fontFamily: "system-ui, -apple-system, sans-serif",
   fontSize: 13,
-  backdropFilter: "blur(18px)",
   whiteSpace: "nowrap",
 };
 
@@ -272,14 +308,13 @@ const PEARL_PILL: React.CSSProperties = {
   gap: 8,
   padding: "0 16px",
   height: 36,
-  background: "rgba(255, 255, 255, 0.82)",
+  background: "rgba(255, 255, 255, 0.96)",
   borderRadius: 999,
   border: "1px solid rgba(43, 54, 62, 0.12)",
-  boxShadow: "0 5px 12px rgba(41, 52, 61, 0.12)",
+  boxShadow: "0 4px 12px rgba(41, 52, 61, 0.12)",
   color: "#1d2329",
   fontFamily: "system-ui, -apple-system, sans-serif",
   fontSize: 13,
-  backdropFilter: "blur(16px)",
 };
 
 function OverlayCard({
@@ -294,7 +329,15 @@ function OverlayCard({
   if (state.status === "waiting_for_models") {
     return (
       <div style={PEARL_PILL}>
-        <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#d97706", flexShrink: 0 }} />
+        <div
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: "#d97706",
+            flexShrink: 0,
+          }}
+        />
         <span style={{ color: "#5a6470" }}>Starting…</span>
       </div>
     );
@@ -303,7 +346,15 @@ function OverlayCard({
   if (state.status === "degraded") {
     return (
       <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
-        <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", flexShrink: 0 }} />
+        <div
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: "#ef4444",
+            flexShrink: 0,
+          }}
+        />
         <span style={{ color: "#b91c1c" }}>Degraded</span>
       </div>
     );
@@ -322,7 +373,17 @@ function OverlayCard({
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
         <div className="vox-icon-x" />
         <WaveformBars barsRef={barsRef} />
-        <div className="vox-icon-check" style={{ opacity: 0.35 }} />
+        <span
+          style={{
+            color: "#5a6470",
+            fontSize: 12,
+            fontWeight: 500,
+            flexShrink: 0,
+            letterSpacing: "0.01em",
+          }}
+        >
+          Listening…
+        </span>
       </div>
     );
   }
@@ -331,7 +392,16 @@ function OverlayCard({
     return (
       <div className="vox-capsule" style={CAPSULE}>
         <div className="vox-icon-x" style={{ opacity: 0.3 }} />
-        <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, minWidth: 84 }}>
+        <div
+          style={{
+            flex: "1 1 auto",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 7,
+            minWidth: 84,
+          }}
+        >
           <Spinner />
           <span style={{ color: "#5a6470" }}>Processing…</span>
         </div>
@@ -344,7 +414,15 @@ function OverlayCard({
     return (
       <div className="vox-capsule" style={CAPSULE}>
         <div className="vox-icon-x" style={{ opacity: 0.3 }} />
-        <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center", minWidth: 84 }}>
+        <div
+          style={{
+            flex: "1 1 auto",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            minWidth: 84,
+          }}
+        >
           <span style={{ color: "#5a6470" }}>Done</span>
         </div>
         <div className="vox-icon-check" />
@@ -361,7 +439,7 @@ function useWebSocket(
   dispatch: React.Dispatch<AppAction>,
   onHandoff: (transcript: string) => void,
   levelRef: React.MutableRefObject<number>,
-  lastLevelTimeRef: React.MutableRefObject<number>
+  lastLevelTimeRef: React.MutableRefObject<number>,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -397,8 +475,14 @@ function useWebSocket(
       if (msg.type === "partial_update" && msg.content) {
         dispatch({ type: "PARTIAL_UPDATE", content: msg.content });
       } else if (msg.type === "handoff_ready" && msg.canary_transcript) {
-        console.log("[vox] ws: handoff_ready transcript:", msg.canary_transcript);
-        dispatch({ type: "HANDOFF_READY", canaryTranscript: msg.canary_transcript });
+        console.log(
+          "[vox] ws: handoff_ready transcript:",
+          msg.canary_transcript,
+        );
+        dispatch({
+          type: "HANDOFF_READY",
+          canaryTranscript: msg.canary_transcript,
+        });
         onHandoff(msg.canary_transcript);
       } else if (msg.type === "error") {
         console.log("[vox] ws: sidecar error:", msg.message);
@@ -413,7 +497,9 @@ function useWebSocket(
 
     ws.onclose = (e) => {
       const delay = Math.min(30000, retryDelayRef.current);
-      console.log(`[vox] ws: closed (code=${e.code}), reconnecting in ${delay}ms`);
+      console.log(
+        `[vox] ws: closed (code=${e.code}), reconnecting in ${delay}ms`,
+      );
       retryDelayRef.current = delay * 2;
       retryTimerRef.current = setTimeout(connect, delay);
     };
@@ -432,7 +518,12 @@ function useWebSocket(
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(msg);
     } else {
-      console.log("[vox] ws: not open (readyState=" + ws?.readyState + "), message dropped:", msg);
+      console.log(
+        "[vox] ws: not open (readyState=" +
+          ws?.readyState +
+          "), message dropped:",
+        msg,
+      );
     }
   }, []);
 
@@ -454,65 +545,119 @@ function useWebSocket(
   return { wsRef, beginStream, terminateStream, cancelStream };
 }
 
-// Window show/hide is managed entirely by Rust:
-//   hotkey PRESSED  → Rust calls w.show() + w.set_focus() before emitting event
-//   hotkey RELEASED → Rust calls w.hide() before emitting event
-// React never touches window visibility — eliminates async JS/Rust show-hide race.
-
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, { status: "waiting_for_models" });
+  const [state, dispatch] = useReducer(reducer, {
+    status: "waiting_for_models",
+  });
   const stateRef = useRef(state);
-  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   // Refs for real-time audio level animation (no React re-renders)
-  const barsRef = useRef<Array<HTMLDivElement | null>>(new Array(NUM_BARS).fill(null));
+  const barsRef = useRef<Array<HTMLDivElement | null>>(
+    new Array(NUM_BARS).fill(null),
+  );
   const levelRef = useRef(0);
   const lastLevelTimeRef = useRef(0);
   const smoothedRef = useRef(0);
   const rafRef = useRef<number>();
+  const contextRef = useRef<DeepContextPayload | null>(null);
 
   // RAF loop: runs at 60fps, drives bar heights from real audio amplitude
   useEffect(() => {
     const animate = () => {
-      // If no audio_level received in the last 400ms, use a slow idle pulse as fallback
-      const hasRealLevel = Date.now() - lastLevelTimeRef.current < 400;
+      const t = Date.now();
+      const hasRealLevel = t - lastLevelTimeRef.current < 400;
       const target = hasRealLevel
         ? levelRef.current
-        : Math.abs(Math.sin(Date.now() / 700)) * 0.06; // subtle idle breathing
+        : Math.abs(Math.sin(t / 900)) * 0.04; // subtle idle breathing
 
-      // Exponential smoothing: fast attack (~4 frames), slower decay (~12 frames)
-      smoothedRef.current = smoothedRef.current * 0.75 + target * 0.25;
+      // Asymmetric smoothing: snappy attack (2 frames to 75%), graceful decay (~6 frames)
+      if (target > smoothedRef.current) {
+        smoothedRef.current = smoothedRef.current * 0.45 + target * 0.55;
+      } else {
+        smoothedRef.current = smoothedRef.current * 0.82 + target * 0.18;
+      }
       const s = smoothedRef.current;
 
       barsRef.current.forEach((bar, i) => {
-        if (bar) {
-          // Small per-frame noise adds organic feel; scaled by current level
-          const noise = (Math.random() - 0.5) * s * 2;
-          const h = MIN_BAR_H + (s * MAX_BAR_H + noise) * BAR_MULTIPLIERS[i];
-          bar.style.height = `${Math.max(MIN_BAR_H, h)}px`;
-        }
+        if (!bar) return;
+        // Each bar oscillates at its own phase — independent organic movement proportional to level
+        const phase = (i / NUM_BARS) * Math.PI * 2;
+        const wiggle = Math.sin(t / 110 + phase) * 0.2 * s;
+        const barLevel = Math.max(0, Math.min(1, s + wiggle));
+        // Peak height is bar's EQ profile position; all bars animate from MIN to their peak
+        const peak = MIN_BAR_H + BAR_MULTIPLIERS[i] * (MAX_BAR_H - MIN_BAR_H);
+        const h = MIN_BAR_H + barLevel * (peak - MIN_BAR_H);
+        bar.style.height = `${h}px`;
       });
 
       rafRef.current = requestAnimationFrame(animate);
     };
 
     rafRef.current = requestAnimationFrame(animate);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
   }, []);
 
-  // M9 injection stub — M10 replaces with fetch /process-text + invoke inject_text
-  const handleHandoff = useCallback((_canaryTranscript: string) => {
-    console.log("[vox] handleHandoff stub: dispatching INJECTION_DONE (M10 will inject)");
-    setTimeout(() => dispatch({ type: "INJECTION_DONE" }), 300);
-  }, []);
+  const handleHandoff = useCallback(
+    async (canaryTranscript: string) => {
+      const ctx = contextRef.current;
+      const body: ProcessTextRequest = {
+        raw_transcript: canaryTranscript,
+        context_string: ctx?.window_title ?? "",
+        executable_name: ctx?.executable_name ?? "",
+        window_title: ctx?.window_title ?? "",
+        inferred_extension: ctx?.inferred_extension ?? null,
+        text_preceding_cursor: ctx?.text_preceding_cursor ?? "",
+        text_succeeding_cursor: ctx?.text_succeeding_cursor ?? "",
+        use_local_llm: true,
+        custom_vocabulary: [],
+      };
+
+      let textToInject = canaryTranscript;
+      try {
+        const resp = await fetch(
+          `http://127.0.0.1:${sidecarPort}/process-text`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(45000),
+          },
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.cleaned_text) textToInject = data.cleaned_text;
+          if (data.error)
+            console.warn("[vox] process-text non-fatal error:", data.error);
+        }
+      } catch (e) {
+        console.warn("[vox] process-text fetch failed, injecting raw:", e);
+      }
+
+      try {
+        await invoke("inject_text", { text: textToInject });
+        console.log("[vox] inject_text: done");
+      } catch (e) {
+        console.error("[vox] inject_text failed:", e);
+      } finally {
+        contextRef.current = null;
+        dispatch({ type: "INJECTION_DONE" });
+      }
+    },
+    [dispatch],
+  );
 
   const { beginStream, terminateStream, cancelStream } = useWebSocket(
     dispatch,
     handleHandoff,
     levelRef,
-    lastLevelTimeRef
+    lastLevelTimeRef,
   );
 
   // Tauri event listeners
@@ -530,17 +675,26 @@ export default function App() {
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
+            // Capture focused window context before recording starts — target still has focus
+            invoke<DeepContextPayload>("get_focused_context")
+              .then((ctx) => {
+                contextRef.current = ctx;
+              })
+              .catch(() => {
+                contextRef.current = null;
+              });
             levelRef.current = 0;
             lastLevelTimeRef.current = 0;
             smoothedRef.current = 0;
             beginStream();
             dispatch({ type: "START_RECORDING" });
           } else {
-            // waiting_for_models / degraded — state content is already rendered; move on-screen
-            invoke("position_overlay").catch(console.error);
-            console.log(`[vox] hotkey-pressed: not ready (state=${s})`);
+            // waiting_for_models / degraded — ignore hotkey, models not loaded
+            console.log(
+              `[vox] hotkey-pressed: not ready, ignoring (state=${s})`,
+            );
           }
-        })
+        }),
       );
 
       cleanups.push(
@@ -552,9 +706,11 @@ export default function App() {
             terminateStream();
             dispatch({ type: "STOP_RECORDING" });
           } else {
-            console.log(`[vox] hotkey-released: no stream to stop (state=${s})`);
+            console.log(
+              `[vox] hotkey-released: no stream to stop (state=${s})`,
+            );
           }
-        })
+        }),
       );
 
       cleanups.push(
@@ -562,23 +718,28 @@ export default function App() {
           console.log("[vox] event: models-ready — discovering port...");
           sidecarPort = await discoverSidecarPort();
           dispatch({ type: "MODELS_READY" });
-        })
+        }),
       );
 
       cleanups.push(
         await listen<{ missing: string[] }>("sidecar-degraded", (e) => {
-          console.log("[vox] event: sidecar-degraded, missing=", e.payload.missing);
+          console.log(
+            "[vox] event: sidecar-degraded, missing=",
+            e.payload.missing,
+          );
           dispatch({ type: "MODELS_DEGRADED", missing: e.payload.missing });
           // Do NOT showWindow() — window only appears on hotkey press
-        })
+        }),
       );
 
       cleanups.push(
         await listen<null>("sidecar-restarting", async () => {
-          console.log("[vox] event: sidecar-restarting, re-discovering port...");
+          console.log(
+            "[vox] event: sidecar-restarting, re-discovering port...",
+          );
           dispatch({ type: "SIDECAR_RESTARTING" });
           sidecarPort = await discoverSidecarPort();
-        })
+        }),
       );
     };
 
@@ -586,7 +747,9 @@ export default function App() {
       // Race-condition guard: models-ready may have fired before listeners registered
       const port = await checkAlreadyReady();
       if (port !== null && stateRef.current.status === "waiting_for_models") {
-        console.log(`[vox] post-register: sidecar already ready on port ${port}`);
+        console.log(
+          `[vox] post-register: sidecar already ready on port ${port}`,
+        );
         sidecarPort = port;
         dispatch({ type: "MODELS_READY" });
       }
@@ -594,15 +757,6 @@ export default function App() {
 
     return () => cleanups.forEach((fn) => fn());
   }, [beginStream, cancelStream, terminateStream]);
-
-  // Move window on-screen after React has rendered the pill (useEffect fires post-paint).
-  // Only fires for "recording" — streaming keeps it on-screen without re-invoking,
-  // and finalizing/injecting must stay off-screen to avoid fighting Rust's RELEASED handler.
-  useEffect(() => {
-    if (state.status === "recording") {
-      invoke("position_overlay").catch(console.error);
-    }
-  }, [state.status]);
 
   // ERROR auto-reset after 4s
   useEffect(() => {
@@ -623,6 +777,16 @@ export default function App() {
   useEffect(() => {
     console.log("[vox] state ->", state.status, state);
   }, [state]);
+
+  // Park window off-screen when idle — Rust moves it on-screen on hotkey press.
+  // setPosition keeps WebView2 compositor active (no reinit, no black/transparent flash).
+  useEffect(() => {
+    if (state.status === "idle") {
+      getCurrentWindow()
+        .setPosition(new LogicalPosition(-10000, -10000))
+        .catch(() => {});
+    }
+  }, [state.status]);
 
   return (
     <>
