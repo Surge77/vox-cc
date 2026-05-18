@@ -34,6 +34,7 @@ interface VoxSettings {
   vocabulary: string[];
   passiveCollectionEnabled: boolean;
   defaultStyle: string;
+  retentionDays: 0 | 7 | 30 | null;
 }
 
 const DEFAULT_SETTINGS: VoxSettings = {
@@ -44,6 +45,7 @@ const DEFAULT_SETTINGS: VoxSettings = {
   vocabulary: [],
   passiveCollectionEnabled: false,
   defaultStyle: "auto",
+  retentionDays: null,
 };
 
 const SETTINGS_KEY = "vox_settings";
@@ -652,7 +654,7 @@ export default function Settings() {
         </div>
 
         {/* Data Collection Section */}
-        <div style={SECTION_LAST}>
+        <div style={SECTION}>
           <div style={SECTION_LABEL}>Passive Data Collection</div>
           <label style={TOGGLE_LABEL}>
             <input
@@ -666,6 +668,38 @@ export default function Settings() {
             Transcripts are saved to your local data directory only. Never
             transmitted. Used to fine-tune the model from the Fine-Tuning
             dashboard.
+          </p>
+        </div>
+
+        {/* Privacy Section */}
+        <div style={SECTION_LAST}>
+          <div style={SECTION_LABEL}>Privacy</div>
+          <div style={ROW}>
+            <label style={{ fontSize: 14, flexShrink: 0 }}>Log retention</label>
+            <select
+              style={{ ...SELECT, flex: "0 0 auto", width: 160 }}
+              value={settings.retentionDays ?? ""}
+              onChange={(e) => {
+                const val =
+                  e.target.value === ""
+                    ? null
+                    : (Number(e.target.value) as 0 | 7 | 30);
+                update({ retentionDays: val });
+                fetch(API("/settings/privacy"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ retention_days: val }),
+                }).catch(() => {});
+              }}
+            >
+              <option value="">Keep forever</option>
+              <option value="30">30 days</option>
+              <option value="7">7 days</option>
+              <option value="0">Disable collection</option>
+            </select>
+          </div>
+          <p style={HINT}>
+            Old log entries and audio clips are deleted on sidecar startup.
           </p>
         </div>
       </div>

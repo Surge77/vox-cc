@@ -93,3 +93,25 @@ async def set_audio_settings(req: AudioSettingsRequest):
     with open(settings_path, "w") as f:
         json.dump(settings, f)
     return {"ok": True}
+
+
+class PrivacySettingsRequest(BaseModel):
+    retention_days: int | None = None
+
+
+@router.post("/settings/privacy")
+async def set_privacy_settings(req: PrivacySettingsRequest):
+    import main as state
+    settings_path = os.path.join(state.DATA_DIR, "settings.json")
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        settings = {}
+    settings["retention_days"] = req.retention_days
+    if req.retention_days == 0:
+        settings["passive_collection_enabled"] = False
+    os.makedirs(state.DATA_DIR, exist_ok=True)
+    with open(settings_path, "w") as f:
+        json.dump(settings, f)
+    return {"ok": True}

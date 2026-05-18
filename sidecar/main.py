@@ -31,6 +31,7 @@ _turbo_model_ref: list = [None]  # list so M3 distil_sequential can null it in p
 _llm_ref: list = [None]
 _llm_loading: bool = False       # True while LLM loads in background; health reports llm:true during this window
 _pending_audio_uuid: str | None = None  # set by terminate_stream when collection on; cleared by /process-text
+_pending_latencies: dict | None = None  # set by terminate_stream; merged into passive_log by /process-text
 
 
 PID_LOCK = os.path.join(os.path.expanduser("~"), ".vox", "data", "sidecar.pid")
@@ -245,6 +246,58 @@ def cleanup() -> None:
     pass
 
 
+def _cleanup_old_logs(data_dir: str) -> None:
+    """Delete passive_log entries and audio clips older than retention_days.
+    If retention_days is 0, passive collection is also disabled."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    settings_path = os.path.join(data_dir, "settings.json")
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    retention_days = settings.get("retention_days")
+    if retention_days is None:
+        return
+    if retention_days == 0:
+        settings["passive_collection_enabled"] = False
+        try:
+            with open(settings_path, "w") as f:
+                json.dump(settings, f)
+        except Exception:
+            pass
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    log_path = os.path.join(data_dir, "passive_log.jsonl")
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            lines = f.readlines()
+        kept = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+                ts = datetime.fromisoformat(entry.get("timestamp", ""))
+                if ts >= cutoff:
+                    kept.append(line)
+            except (ValueError, KeyError):
+                kept.append(line)
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+    except FileNotFoundError:
+        pass
+    clips_dir = os.path.join(data_dir, "audio_clips")
+    if os.path.isdir(clips_dir):
+        for fname in os.listdir(clips_dir):
+            fpath = os.path.join(clips_dir, fname)
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
+                if mtime < cutoff:
+                    os.remove(fpath)
+            except Exception:
+                pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _llm_loading
@@ -254,6 +307,7 @@ async def lifespan(app: FastAPI):
     # Without this, a poll between yield and task-start sees llm=false → sidecar-degraded.
     _llm_loading = True
     asyncio.create_task(asyncio.to_thread(startup_llm))
+    _cleanup_old_logs(DATA_DIR)
     yield
     cleanup()
 
@@ -266,12 +320,14 @@ from routers.text_processing import router as text_processing_router
 from routers.vocabulary import router as vocabulary_router
 from routers.finetuning import router as finetuning_router
 from routers.snippets import router as snippets_router
+from routers.replay import router as replay_router
 app.include_router(health_router)
 app.include_router(dictation_router)
 app.include_router(text_processing_router)
 app.include_router(vocabulary_router)
 app.include_router(finetuning_router)
 app.include_router(snippets_router)
+app.include_router(replay_router)
 
 
 if __name__ == "__main__":

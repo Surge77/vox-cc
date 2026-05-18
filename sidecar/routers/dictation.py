@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import uuid as _uuid_mod
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -101,7 +102,13 @@ async def dictation_ws(ws: WebSocket):
                     session.close_stream()
                     _maybe_save_audio(session, state)
                     fallback = session.build_turbo_fallback()
+                    t0 = time.monotonic()
                     final_text = await _run_final_pass(session, state, fallback)
+                    final_pass_ms = int((time.monotonic() - t0) * 1000)
+                    state._pending_latencies = {
+                        "capture_stop_ms": int(t0 * 1000),
+                        "final_pass_ms": final_pass_ms,
+                    }
                     result = final_text or fallback
                     if result:
                         await ws.send_json({
@@ -192,7 +199,13 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
                 session.stop_capture()
                 session.close_stream()
                 fallback = session.build_turbo_fallback()
+                t0 = time.monotonic()
                 final_text = await _run_final_pass(session, state, fallback)
+                final_pass_ms = int((time.monotonic() - t0) * 1000)
+                state._pending_latencies = {
+                    "capture_stop_ms": int(t0 * 1000),
+                    "final_pass_ms": final_pass_ms,
+                }
                 result = final_text or fallback
                 try:
                     await ws.send_json({"type": "stream_stopped"})

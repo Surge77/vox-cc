@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -42,7 +43,9 @@ async def process_text(req: ProcessTextRequest):
 
     cleaned = raw
     error = None
+    llm_ms: int | None = None
     try:
+        t0 = time.monotonic()
         if req.use_local_llm and state._models_state.get("llm"):
             llm = state._llm_ref[0]
             loop = asyncio.get_event_loop()
@@ -61,11 +64,12 @@ async def process_text(req: ProcessTextRequest):
                 timeout=15.0,
             )
             cleaned = result if result else raw
+        llm_ms = int((time.monotonic() - t0) * 1000)
     except Exception as e:
         error = str(e)
 
     cleaned = _expand_snippets(state.DATA_DIR, cleaned)
-    _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name)
+    _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name, llm_ms)
     return ProcessTextResponse(cleaned_text=cleaned, error=error)
 
 
@@ -102,7 +106,13 @@ def _expand_snippets(data_dir: str, text: str) -> str:
     return text
 
 
-def _append_passive_log(data_dir: str, raw: str, cleaned: str, executable_name: str) -> None:
+def _append_passive_log(
+    data_dir: str,
+    raw: str,
+    cleaned: str,
+    executable_name: str,
+    llm_ms: int | None = None,
+) -> None:
     import json
     from datetime import datetime, timezone
     settings_path = os.path.join(data_dir, "settings.json")
@@ -124,6 +134,11 @@ def _append_passive_log(data_dir: str, raw: str, cleaned: str, executable_name: 
     if state._pending_audio_uuid:
         entry["audio_file"] = f"{state._pending_audio_uuid}.npy"
         state._pending_audio_uuid = None
+    if state._pending_latencies:
+        entry.update(state._pending_latencies)
+        state._pending_latencies = None
+    if llm_ms is not None:
+        entry["llm_ms"] = llm_ms
 
     log_path = os.path.join(data_dir, "passive_log.jsonl")
     os.makedirs(data_dir, exist_ok=True)
