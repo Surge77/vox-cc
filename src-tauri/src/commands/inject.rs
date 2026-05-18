@@ -4,8 +4,9 @@ use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
@@ -71,10 +72,67 @@ fn is_electron_window(hwnd: HWND) -> bool {
     get_exe_name_for_hwnd(hwnd).contains("electron")
 }
 
+fn is_process_elevated(pid: u32) -> bool {
+    unsafe {
+        let Ok(proc) = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(proc, TOKEN_QUERY, &mut token).is_err() {
+            let _ = CloseHandle(proc);
+            return false;
+        }
+        let mut elev = TOKEN_ELEVATION::default();
+        let mut ret_len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elev as *mut _ as *mut std::ffi::c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        let _ = CloseHandle(proc);
+        ok && elev.TokenIsElevated != 0
+    }
+}
+
+fn is_self_elevated() -> bool {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let proc = GetCurrentProcess(); // pseudo-handle — must NOT CloseHandle
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(proc, TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elev = TOKEN_ELEVATION::default();
+        let mut ret_len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elev as *mut _ as *mut std::ffi::c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elev.TokenIsElevated != 0
+    }
+}
+
 fn inject_sync(text: &str) -> Result<(), String> {
     let _com = ComGuard::init();
 
     let hwnd: HWND = unsafe { GetForegroundWindow() };
+
+    // UAC guard: standard-user Vox cannot inject into elevated processes
+    let mut target_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_pid)); }
+    if target_pid != 0 && !is_self_elevated() && is_process_elevated(target_pid) {
+        return Err("elevation_mismatch".to_string());
+    }
+
     let electron = hwnd.0 != 0 && is_electron_window(hwnd);
 
     let mut attempts = 0u8;
