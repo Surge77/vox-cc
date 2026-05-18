@@ -347,7 +347,11 @@ function OverlayCard({
             letterSpacing: "0.01em",
           }}
         >
-          {isListening ? "Listening…" : ""}
+          {status === "capturing"
+            ? "Starting…"
+            : isListening
+              ? "Listening…"
+              : ""}
         </span>
       </div>
     );
