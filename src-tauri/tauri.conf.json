@@ -33,12 +33,22 @@
     "active": true,
     "targets": "nsis",
     "icon": ["icons/icon.ico"],
-    "externalBin": ["../sidecar/dist/sidecar/sidecar"],
+    "externalBin": ["binaries/sidecar"],
+    "resources": {
+      "binaries/_internal": "_internal"
+    },
     "windows": {
       "digestAlgorithm": "sha256",
       "certificateThumbprint": null,
       "webviewInstallMode": {
-        "type": "skip"
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "startMenuFolder": "Vox",
+        "displayLanguageSelector": false
       }
     }
   }
