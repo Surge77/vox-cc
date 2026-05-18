@@ -34,9 +34,6 @@
     "targets": "nsis",
     "icon": ["icons/icon.ico"],
     "externalBin": ["binaries/sidecar"],
-    "resources": {
-      "binaries/_internal": "_internal"
-    },
     "windows": {
       "digestAlgorithm": "sha256",
       "certificateThumbprint": null,
@@ -48,7 +45,8 @@
         "installMode": "currentUser",
         "languages": ["English"],
         "startMenuFolder": "Vox",
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "compression": "lzma"
       }
     }
   }
