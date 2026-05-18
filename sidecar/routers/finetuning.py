@@ -68,17 +68,24 @@ async def finetune_start(req: FinetuneStartRequest):
 
 
 async def _run_training_task(state, epochs: int, lr: float, sample_count: int) -> None:
-    train_script = os.path.join(os.path.dirname(__file__), "..", "training", "train.py")
     output_dir = os.path.join(state.DATA_DIR, "training_output")
     os.makedirs(output_dir, exist_ok=True)
+    common_args = [
+        "--data-dir", state.DATA_DIR,
+        "--model-dir", state.MODEL_DIR,
+        "--epochs", str(epochs),
+        "--lr", str(lr),
+        "--output-dir", output_dir,
+    ]
+    if getattr(sys, "frozen", False):
+        # Frozen build: re-exec sidecar.exe with sentinel so main.py dispatches to train.main()
+        cmd = [sys.executable, "--train-subprocess", *common_args]
+    else:
+        train_script = os.path.join(os.path.dirname(__file__), "..", "training", "train.py")
+        cmd = [sys.executable, train_script, *common_args]
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, train_script,
-            "--data-dir", state.DATA_DIR,
-            "--model-dir", state.MODEL_DIR,
-            "--epochs", str(epochs),
-            "--lr", str(lr),
-            "--output-dir", output_dir,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

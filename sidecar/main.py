@@ -341,6 +341,14 @@ app.include_router(replay_router)
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--train-subprocess":
+        # Frozen-build re-exec path: strip sentinel and dispatch to training.train.
+        # In a venv (dev), finetuning.py calls train.py directly; this branch only
+        # activates when sys.executable is the frozen sidecar.exe.
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        from training import train  # bundled inside PYZ via hiddenimports
+        train.main()
+        sys.exit(0)
     kill_previous_sidecar()  # free VRAM before detecting it
     port = find_free_port()
     write_port_lock(port)
