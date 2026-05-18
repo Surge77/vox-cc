@@ -96,10 +96,14 @@ async def dictation_ws(ws: WebSocket):
                     _maybe_save_audio(session, state)
                     fallback = session.build_turbo_fallback()
                     final_text = await _run_final_pass(session, state, fallback)
-                    await ws.send_json({
-                        "type": "handoff_ready",
-                        "canary_transcript": final_text,
-                    })
+                    result = final_text or fallback
+                    if result:
+                        await ws.send_json({
+                            "type": "handoff_ready",
+                            "canary_transcript": result,
+                        })
+                    else:
+                        await ws.send_json({"type": "error", "message": "No speech detected"})
                     session.reset()
                     session = None
                 state._session_active = False
@@ -170,11 +174,12 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
                 session.close_stream()
                 fallback = session.build_turbo_fallback()
                 final_text = await _run_final_pass(session, state, fallback)
+                result = final_text or fallback
                 try:
-                    await ws.send_json({
-                        "type": "handoff_ready",
-                        "canary_transcript": final_text,
-                    })
+                    if result:
+                        await ws.send_json({"type": "handoff_ready", "canary_transcript": result})
+                    else:
+                        await ws.send_json({"type": "error", "message": "No speech detected"})
                 except Exception:
                     pass
                 session.reset()
@@ -188,3 +193,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
         session.stop_capture()
         session.close_stream()
         state._session_active = False
+    finally:
+        # Flush any partial audio accumulated since last full chunk — distil needs it
+        if accumulator:
+            session.flush_partial(np.concatenate(accumulator))

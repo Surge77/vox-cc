@@ -26,9 +26,13 @@ class ProcessTextResponse(BaseModel):
 @router.post("/process-text", response_model=ProcessTextResponse)
 async def process_text(req: ProcessTextRequest):
     import main as state
-    from models.prompt_router import get_system_prompt
+    from models.prompt_router import render_system_prompt
 
-    system_prompt = get_system_prompt(req.executable_name)
+    system_prompt = render_system_prompt(
+        req.executable_name,
+        preceding_text=req.text_preceding_cursor,
+        vocabulary=req.custom_vocabulary or [],
+    )
     raw = req.raw_transcript.strip()
 
     if not raw:

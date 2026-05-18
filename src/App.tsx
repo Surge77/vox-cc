@@ -482,16 +482,21 @@ function useWebSocket(
 
       if (msg.type === "partial_update" && msg.content) {
         dispatch({ type: "PARTIAL_UPDATE", content: msg.content });
-      } else if (msg.type === "handoff_ready" && msg.canary_transcript) {
-        console.log(
-          "[vox] ws: handoff_ready transcript:",
-          msg.canary_transcript,
-        );
-        dispatch({
-          type: "HANDOFF_READY",
-          canaryTranscript: msg.canary_transcript,
-        });
-        onHandoff(msg.canary_transcript);
+      } else if (msg.type === "handoff_ready") {
+        if (msg.canary_transcript) {
+          console.log(
+            "[vox] ws: handoff_ready transcript:",
+            msg.canary_transcript,
+          );
+          dispatch({
+            type: "HANDOFF_READY",
+            canaryTranscript: msg.canary_transcript,
+          });
+          onHandoff(msg.canary_transcript);
+        } else {
+          console.log("[vox] ws: handoff_ready empty — resetting to idle");
+          dispatch({ type: "CANCEL_RECORDING" });
+        }
       } else if (msg.type === "error") {
         console.log("[vox] ws: sidecar error:", msg.message);
         dispatch({ type: "ERROR", message: msg.message ?? "Sidecar error" });

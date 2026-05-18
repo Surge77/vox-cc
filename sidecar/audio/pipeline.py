@@ -28,15 +28,33 @@ def load_vocabulary_prompt() -> str:
         return ""
 
 
+def _dedup_overlap(prev_tail: list[str], new_text: str) -> str:
+    """Remove from new_text any prefix that repeats the suffix of prev_tail.
+    Handles the 200ms overlap region where Turbo may re-transcribe earlier words."""
+    new_words = new_text.split()
+    if not prev_tail or not new_words:
+        return new_text
+    for n in range(min(len(prev_tail), len(new_words), 6), 0, -1):
+        if [w.lower() for w in prev_tail[-n:]] == [w.lower() for w in new_words[:n]]:
+            return " ".join(new_words[n:])
+    return new_text
+
+
 class DictationSession:
     def __init__(self, turbo_model_ref: list, load_plan: dict):
         self._turbo_ref = turbo_model_ref
         self._load_plan = load_plan
-        self._ring: list[np.ndarray] = []      # raw chunks; used for M3 full-session audio + overlap
-        self._session_words: list[str] = []    # accumulated words across all chunks
-        self._last_valid_ts: float = 0.0
+        self._ring: list[np.ndarray] = []
+        self._session_words: list[str] = []
+        self._prev_tail: list[str] = []      # last few words for textual overlap dedup
+        self._vocab_prompt: str | None = None  # cached for session lifetime
         self._capture: AudioCapture | None = None
         self._active = False
+
+    def _get_vocab_prompt(self) -> str:
+        if self._vocab_prompt is None:
+            self._vocab_prompt = load_vocabulary_prompt()
+        return self._vocab_prompt
 
     def open_mic(self, device_index: int | None = None) -> None:
         self._capture = AudioCapture(device_index=device_index)
@@ -44,14 +62,11 @@ class DictationSession:
         self._active = True
 
     def stop_capture(self) -> None:
-        """Signal the capture loop to stop. Does NOT close the PyAudio stream.
-        Call close_stream() only after the capture loop task has finished to
-        avoid closing the stream while read_chunk is running in its thread."""
+        """Signal the capture loop to stop. Does NOT close the PyAudio stream."""
         self._active = False
 
     def close_stream(self) -> None:
-        """Close the PyAudio stream. Must only be called after the capture loop
-        task has completed (i.e., after awaiting capture_task in dictation.py)."""
+        """Close the PyAudio stream. Must only be called after the capture loop task has finished."""
         if self._capture:
             self._capture.close()
             self._capture = None
@@ -64,13 +79,18 @@ class DictationSession:
     def is_active(self) -> bool:
         return self._active
 
+    def flush_partial(self, chunk: np.ndarray) -> None:
+        """Append remaining partial audio to ring so distil final pass gets complete session audio."""
+        if len(chunk) > 0:
+            self._ring.append(chunk)
+
     async def process_chunk(self, chunk: np.ndarray, ws) -> bool:
         """
         Process one audio chunk. Returns True if session should auto-terminate (60s cap).
-        Ring always stores every chunk so distil final pass gets complete session audio.
-        Flow: AGC → Silero VAD gate → noise suppress → Whisper Turbo.
+        Ring always stores every raw chunk so distil final pass gets complete session audio.
+        Flow: Silero VAD gate (chunk level) → AGC + noise suppress → Turbo → textual dedup.
         """
-        # Always store raw audio in ring — distil needs the full session
+        # Always store raw audio — distil needs the full unprocessed session
         overlap = self._ring[-1][-OVERLAP_SAMPLES:] if self._ring else np.array([], dtype=np.float32)
         self._ring.append(chunk)
 
@@ -78,7 +98,7 @@ class DictationSession:
         if total >= MAX_SAMPLES:
             return True
 
-        # VAD on raw chunk — Silero sees real signal energy, not amplified noise
+        # Silero VAD gate on raw chunk — don't run Turbo on silence
         if not should_transcribe(chunk):
             return False
 
@@ -86,19 +106,16 @@ class DictationSession:
         if turbo is None:
             return False
 
-        # Build raw feed first (overlap + current chunk both raw), then AGC the full feed.
-        # AGC'ing overlap+chunk together keeps gain consistent across the context window.
+        # Build Turbo feed: overlap + current chunk, then AGC + noise suppress
         raw_feed = np.concatenate([overlap, chunk]) if len(overlap) else chunk.copy()
         feed = apply_agc(raw_feed)
         feed = suppress_noise(feed, SAMPLE_RATE)
 
-        vocab_prompt = load_vocabulary_prompt()
+        vocab_prompt = self._get_vocab_prompt()
         try:
             segments, _ = turbo.transcribe(
                 feed,
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
+                word_timestamps=False,   # textual dedup instead — avoids expensive timestamp scan
                 language="en",
                 beam_size=1,
                 initial_prompt=vocab_prompt or None,
@@ -107,20 +124,17 @@ class DictationSession:
         except Exception:
             return False
 
-        # Per-chunk timestamp filter:
-        # - First chunk (no overlap): accept from 0.0
-        # - Subsequent chunks: skip overlap region (first 0.2s of feed are old audio)
-        # Cross-chunk last_valid_ts is NOT used here — timestamps reset each feed.
-        OVERLAP_DUR = OVERLAP_SAMPLES / SAMPLE_RATE  # 0.2s
-        filter_ts = OVERLAP_DUR if len(self._ring) > 1 else 0.0
-
         for seg in segments:
-            for word in (seg.words or []):
-                if word.start >= filter_ts:
-                    w = word.word.strip()
-                    if w and not is_hallucination(w, word.end - word.start):
-                        self._session_words.append(w)
-                        filter_ts = word.end  # deduplicate within this chunk only
+            text = seg.text.strip()
+            if not text:
+                continue
+            if is_hallucination(text, seg.end - seg.start):
+                continue
+            deduped = _dedup_overlap(self._prev_tail, text)
+            if deduped.strip():
+                words = deduped.split()
+                self._session_words.extend(words)
+                self._prev_tail = self._session_words[-6:]
 
         if self._session_words:
             await ws.send_json({
@@ -134,7 +148,7 @@ class DictationSession:
         return " ".join(self._session_words)
 
     def get_full_audio(self) -> np.ndarray:
-        """Concatenate raw ring buffer. Called by M3 final-pass logic."""
+        """Concatenate raw ring buffer. Called by final-pass logic."""
         if not self._ring:
             return np.array([], dtype=np.float32)
         return np.concatenate(self._ring).astype(np.float32)
@@ -142,4 +156,5 @@ class DictationSession:
     def reset(self) -> None:
         self._ring.clear()
         self._session_words.clear()
-        self._last_valid_ts = 0.0
+        self._prev_tail.clear()
+        self._vocab_prompt = None
