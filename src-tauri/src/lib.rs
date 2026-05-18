@@ -142,5 +142,30 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
+    // First-run welcome toast — fires once per fresh install
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let marker = dirs::home_dir()
+            .map(|h| h.join(".vox").join("data").join("first_run_complete.txt"));
+        if let Some(ref path) = marker {
+            if !path.exists() {
+                let saved = commands::hotkey::read_saved_hotkey();
+                let display = saved.replace("CommandOrControl", "Ctrl");
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Vox is running")
+                    .body(format!(
+                        "Hold {display} anywhere to dictate. Right-click the tray icon for Settings."
+                    ))
+                    .show();
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, "");
+            }
+        }
+    }
+
     Ok(())
 }
