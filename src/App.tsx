@@ -322,7 +322,7 @@ function useWebSocket(
       const raw = localStorage.getItem("vox_settings");
       if (raw) {
         const s = JSON.parse(raw) as { audioDeviceIndex?: unknown };
-        if (typeof s.audioDeviceIndex === "number")
+        if (typeof s.audioDeviceIndex === "number" && s.audioDeviceIndex >= 0)
           deviceIndex = s.audioDeviceIndex;
       }
     } catch {
