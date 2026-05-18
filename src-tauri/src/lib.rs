@@ -100,9 +100,25 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
                     println!("[vox] hotkey: PRESSED");
-                    // React decides whether to start recording (state may not be idle).
-                    // Window positioning is handled by React via invoke("position_overlay")
-                    // so the window only moves when recording actually begins.
+                    // Position + show the window immediately on Rust side — before the
+                    // event crosses the IPC bridge. React may still be loading or in a
+                    // non-idle state; Rust guarantees the window is on-screen so the
+                    // capsule is visible the moment React enters recording.
+                    if let Some(w) = handle2.get_webview_window("main") {
+                        let ms = handle2
+                            .primary_monitor()
+                            .ok()
+                            .flatten()
+                            .map(|m| *m.size())
+                            .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+                        let ws = w.outer_size()
+                            .unwrap_or(tauri::PhysicalSize::new(420, 80));
+                        let x = (ms.width as i32 - ws.width as i32) / 2;
+                        let y = ms.height as i32 - ws.height as i32 - 80;
+                        println!("[vox] hotkey: move to ({x},{y}) monitor={ms:?} window={ws:?}");
+                        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+                        let _ = w.show();
+                    }
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {

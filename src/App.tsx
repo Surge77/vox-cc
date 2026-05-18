@@ -394,9 +394,12 @@ export default function App() {
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
-            // Move window on-screen now that we know recording will actually start.
-            // React owns positioning so the window never appears for ignored hotkeys.
-            invoke("position_overlay").catch(() => {});
+            // Rust already moved+showed the window synchronously before this event
+            // arrived. Call position_overlay again as a React-side confirmation so
+            // any failure is visible in DevTools rather than silently swallowed.
+            invoke("position_overlay").catch((e: unknown) => {
+              console.error("[vox] position_overlay failed:", e);
+            });
             // Capture focused window context before recording starts — target still has focus
             invoke<DeepContextPayload>("get_focused_context")
               .then((ctx) => {
