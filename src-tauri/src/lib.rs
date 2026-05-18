@@ -103,16 +103,21 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     // Move window on-screen before emitting the event. Window is always
                     // visible (shown at startup, never hidden), so set_position is enough —
                     // no show/hide cycle, no WebView2 compositor reinit, no black flash.
+                    // Use AppHandle::primary_monitor() — position-independent, works even
+                    // when the window is parked at (-10000, -10000).
                     if let Some(w) = handle2.get_webview_window("main") {
-                        if let Ok(Some(monitor)) = w.primary_monitor() {
-                            let ms = monitor.size();
-                            let ws = w.outer_size()
-                                .unwrap_or(tauri::PhysicalSize::new(420, 80));
-                            let x = (ms.width as i32 - ws.width as i32) / 2;
-                            let y = ms.height as i32 - ws.height as i32 - 80;
-                            println!("[vox] hotkey: positioning at ({}, {})", x, y);
-                            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-                        }
+                        let ms = handle2
+                            .primary_monitor()
+                            .ok()
+                            .flatten()
+                            .map(|m| *m.size())
+                            .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+                        let ws = w.outer_size()
+                            .unwrap_or(tauri::PhysicalSize::new(420, 80));
+                        let x = (ms.width as i32 - ws.width as i32) / 2;
+                        let y = ms.height as i32 - ws.height as i32 - 80;
+                        println!("[vox] hotkey: positioning at ({x}, {y}) monitor={ms:?} window={ws:?}");
+                        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
                     }
                     handle2.emit("hotkey-pressed", ()).ok();
                 }

@@ -509,7 +509,11 @@ export default function App() {
     reg().then(async () => {
       // Race-condition guard: models-ready may have fired before listeners registered
       const port = await checkAlreadyReady();
-      if (port !== null && stateRef.current.status === "waiting_for_models") {
+      if (
+        port !== null &&
+        (stateRef.current.status === "waiting_for_models" ||
+          stateRef.current.status === "degraded")
+      ) {
         console.log(
           `[vox] post-register: sidecar already ready on port ${port}`,
         );
