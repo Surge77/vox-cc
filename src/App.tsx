@@ -394,6 +394,9 @@ export default function App() {
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
+            // Move window on-screen now that we know recording will actually start.
+            // React owns positioning so the window never appears for ignored hotkeys.
+            invoke("position_overlay").catch(() => {});
             // Capture focused window context before recording starts — target still has focus
             invoke<DeepContextPayload>("get_focused_context")
               .then((ctx) => {
@@ -525,6 +528,29 @@ export default function App() {
 
     return () => cleanups.forEach((fn) => fn());
   }, [beginStream, cancelStream, terminateStream, forceReconnect]);
+
+  // Health poll while waiting_for_models — handles missed models-ready events.
+  // Sidecar may be ready before listeners registered; poll until confirmed.
+  useEffect(() => {
+    if (state.status !== "waiting_for_models") return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      const port = await checkAlreadyReady();
+      if (port !== null && !cancelled) {
+        console.log(`[vox] health-poll: sidecar ready on port ${port}`);
+        sidecarPort = port;
+        forceReconnect();
+        dispatch({ type: "MODELS_READY" });
+      }
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [state.status, forceReconnect]);
 
   // ERROR auto-reset after 4s
   useEffect(() => {

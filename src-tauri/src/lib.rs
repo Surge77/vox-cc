@@ -100,25 +100,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             move |_, _, event| match event.state() {
                 ShortcutState::Pressed => {
                     println!("[vox] hotkey: PRESSED");
-                    // Move window on-screen before emitting the event. Window is always
-                    // visible (shown at startup, never hidden), so set_position is enough —
-                    // no show/hide cycle, no WebView2 compositor reinit, no black flash.
-                    // Use AppHandle::primary_monitor() — position-independent, works even
-                    // when the window is parked at (-10000, -10000).
-                    if let Some(w) = handle2.get_webview_window("main") {
-                        let ms = handle2
-                            .primary_monitor()
-                            .ok()
-                            .flatten()
-                            .map(|m| *m.size())
-                            .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
-                        let ws = w.outer_size()
-                            .unwrap_or(tauri::PhysicalSize::new(420, 80));
-                        let x = (ms.width as i32 - ws.width as i32) / 2;
-                        let y = ms.height as i32 - ws.height as i32 - 80;
-                        println!("[vox] hotkey: positioning at ({x}, {y}) monitor={ms:?} window={ws:?}");
-                        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-                    }
+                    // React decides whether to start recording (state may not be idle).
+                    // Window positioning is handled by React via invoke("position_overlay")
+                    // so the window only moves when recording actually begins.
                     handle2.emit("hotkey-pressed", ()).ok();
                 }
                 ShortcutState::Released => {
