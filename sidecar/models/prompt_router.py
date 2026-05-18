@@ -54,11 +54,18 @@ def render_system_prompt(
     executable_name: str,
     preceding_text: str = "",
     vocabulary: list[str] | None = None,
+    style: str = "auto",
 ) -> str:
     """Return system prompt with optional context appended."""
     profile = get_profile(executable_name)
     try:
-        base = _load_prompt(profile)
+        if style and style != "auto":
+            try:
+                base = _load_prompt(f"{profile}_{style}")
+            except FileNotFoundError:
+                base = _load_prompt(profile)
+        else:
+            base = _load_prompt(profile)
     except FileNotFoundError:
         base = _load_prompt("neutral_fallback")
 

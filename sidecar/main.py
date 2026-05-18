@@ -265,11 +265,13 @@ from routers.dictation import router as dictation_router
 from routers.text_processing import router as text_processing_router
 from routers.vocabulary import router as vocabulary_router
 from routers.finetuning import router as finetuning_router
+from routers.snippets import router as snippets_router
 app.include_router(health_router)
 app.include_router(dictation_router)
 app.include_router(text_processing_router)
 app.include_router(vocabulary_router)
 app.include_router(finetuning_router)
+app.include_router(snippets_router)
 
 
 if __name__ == "__main__":

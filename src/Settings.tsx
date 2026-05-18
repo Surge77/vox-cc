@@ -33,6 +33,7 @@ interface VoxSettings {
   audioDeviceIndex: number;
   vocabulary: string[];
   passiveCollectionEnabled: boolean;
+  defaultStyle: string;
 }
 
 const DEFAULT_SETTINGS: VoxSettings = {
@@ -42,6 +43,7 @@ const DEFAULT_SETTINGS: VoxSettings = {
   audioDeviceIndex: -1,
   vocabulary: [],
   passiveCollectionEnabled: false,
+  defaultStyle: "auto",
 };
 
 const SETTINGS_KEY = "vox_settings";
@@ -215,6 +217,9 @@ export default function Settings() {
   );
   const [vocabSaved, setVocabSaved] = useState(false);
   const [portReady, setPortReady] = useState(false);
+  const [snippets, setSnippets] = useState<Record<string, string>>({});
+  const [snippetTrigger, setSnippetTrigger] = useState("");
+  const [snippetExpansion, setSnippetExpansion] = useState("");
 
   useEffect(() => {
     discoverSidecarPort().then(() => {
@@ -224,6 +229,10 @@ export default function Settings() {
         .then((data: { devices?: AudioDevice[] }) =>
           setDevices(data.devices ?? []),
         )
+        .catch(() => {});
+      fetch(API("/snippets"))
+        .then((r) => r.json())
+        .then((data: Record<string, string>) => setSnippets(data))
         .catch(() => {});
     });
   }, []);
@@ -292,6 +301,54 @@ export default function Settings() {
     }
     setVocabSaved(true);
     setTimeout(() => setVocabSaved(false), 2000);
+  }
+
+  async function setAudioSetting(patch: {
+    agc?: boolean;
+    noise_reduction?: boolean;
+  }) {
+    try {
+      await fetch(API("/settings/audio"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function addSnippet() {
+    const trigger = snippetTrigger.trim();
+    const expansion = snippetExpansion.trim();
+    if (!trigger || !expansion) return;
+    try {
+      await fetch(API("/snippets"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trigger, expansion }),
+      });
+      setSnippets((prev) => ({ ...prev, [trigger]: expansion }));
+      setSnippetTrigger("");
+      setSnippetExpansion("");
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function deleteSnippet(trigger: string) {
+    try {
+      await fetch(API(`/snippets/${encodeURIComponent(trigger)}`), {
+        method: "DELETE",
+      });
+      setSnippets((prev) => {
+        const next = { ...prev };
+        delete next[trigger];
+        return next;
+      });
+    } catch {
+      // non-fatal
+    }
   }
 
   const defaultDeviceIndex = devices.find((d) => d.default)?.index ?? -1;
@@ -469,6 +526,128 @@ export default function Settings() {
           <p style={HINT}>
             Words injected as hints into the transcription model. Takes effect
             on the next session.
+          </p>
+        </div>
+
+        {/* Writing Style Section */}
+        <div style={SECTION}>
+          <div style={SECTION_LABEL}>Writing Style</div>
+          <select
+            style={SELECT}
+            value={settings.defaultStyle}
+            onChange={(e) => update({ defaultStyle: e.target.value })}
+          >
+            <option value="auto">Auto (match app context)</option>
+            <option value="casual">Casual</option>
+            <option value="concise">Concise</option>
+            <option value="professional">Professional</option>
+            <option value="technical">Technical</option>
+            <option value="code">Code</option>
+          </select>
+          <p style={HINT}>
+            Applied by the LLM when cleaning transcripts. Auto uses the detected
+            app profile.
+          </p>
+        </div>
+
+        {/* Audio Processing Section */}
+        <div style={SECTION}>
+          <div style={SECTION_LABEL}>Audio Processing</div>
+          <label style={TOGGLE_LABEL}>
+            <input
+              type="checkbox"
+              defaultChecked={true}
+              onChange={(e) => setAudioSetting({ agc: e.target.checked })}
+            />
+            Automatic Gain Control
+          </label>
+          <label style={{ ...TOGGLE_LABEL, marginTop: 8 }}>
+            <input
+              type="checkbox"
+              defaultChecked={false}
+              onChange={(e) =>
+                setAudioSetting({ noise_reduction: e.target.checked })
+              }
+            />
+            Noise Reduction (experimental)
+          </label>
+          <p style={HINT}>
+            Changes take effect immediately on the next audio chunk.
+          </p>
+        </div>
+
+        {/* Snippets Section */}
+        <div style={SECTION}>
+          <div style={SECTION_LABEL}>Text Snippets</div>
+          <div style={ROW}>
+            <input
+              style={INPUT}
+              placeholder="trigger"
+              value={snippetTrigger}
+              onChange={(e) => setSnippetTrigger(e.target.value)}
+            />
+            <input
+              style={INPUT}
+              placeholder="expansion"
+              value={snippetExpansion}
+              onChange={(e) => setSnippetExpansion(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addSnippet();
+              }}
+            />
+            <button
+              style={
+                !snippetTrigger.trim() || !snippetExpansion.trim()
+                  ? BTN_DISABLED
+                  : BTN
+              }
+              disabled={!snippetTrigger.trim() || !snippetExpansion.trim()}
+              onClick={addSnippet}
+            >
+              Add
+            </button>
+          </div>
+          {Object.entries(snippets).map(([trigger, expansion]) => (
+            <div
+              key={trigger}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginTop: 6,
+                fontSize: 13,
+              }}
+            >
+              <code
+                style={{
+                  background: "#f0f0f0",
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  flexShrink: 0,
+                }}
+              >
+                {trigger}
+              </code>
+              <span style={{ color: "#666", flexShrink: 0 }}>→</span>
+              <span style={{ flex: 1, color: "#1a1a1a" }}>{expansion}</span>
+              <button
+                style={{
+                  border: "none",
+                  background: "none",
+                  color: "#dc2626",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  padding: "0 4px",
+                  flexShrink: 0,
+                }}
+                onClick={() => deleteSnippet(trigger)}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <p style={HINT}>
+            Spoken triggers are replaced with their expansion after LLM cleanup.
           </p>
         </div>
 

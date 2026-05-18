@@ -16,6 +16,7 @@ class ProcessTextRequest(BaseModel):
     text_succeeding_cursor: str = ""
     use_local_llm: bool = True
     custom_vocabulary: list[str] = []
+    style: str = "auto"
 
 
 class ProcessTextResponse(BaseModel):
@@ -32,6 +33,7 @@ async def process_text(req: ProcessTextRequest):
         req.executable_name,
         preceding_text=req.text_preceding_cursor,
         vocabulary=req.custom_vocabulary or [],
+        style=req.style,
     )
     raw = req.raw_transcript.strip()
 
@@ -62,6 +64,7 @@ async def process_text(req: ProcessTextRequest):
     except Exception as e:
         error = str(e)
 
+    cleaned = _expand_snippets(state.DATA_DIR, cleaned)
     _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name)
     return ProcessTextResponse(cleaned_text=cleaned, error=error)
 
@@ -84,6 +87,19 @@ def _load_groq_key() -> str:
             return f.read().strip()
     except FileNotFoundError:
         return ""
+
+
+def _expand_snippets(data_dir: str, text: str) -> str:
+    import json
+    import re
+    try:
+        with open(os.path.join(data_dir, "snippets.json")) as f:
+            snippets: dict[str, str] = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return text
+    for trigger, expansion in snippets.items():
+        text = re.sub(rf"(?i)\b{re.escape(trigger)}\b", expansion, text)
+    return text
 
 
 def _append_passive_log(data_dir: str, raw: str, cleaned: str, executable_name: str) -> None:

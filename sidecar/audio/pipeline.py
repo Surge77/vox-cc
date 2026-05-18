@@ -28,6 +28,15 @@ def load_vocabulary_prompt() -> str:
         return ""
 
 
+def _read_audio_settings() -> dict:
+    from main import DATA_DIR
+    try:
+        with open(os.path.join(DATA_DIR, "settings.json")) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
 def _dedup_overlap(prev_tail: list[str], new_text: str) -> str:
     """Remove from new_text any prefix that repeats the suffix of prev_tail.
     Handles the 200ms overlap region where Turbo may re-transcribe earlier words."""
@@ -106,11 +115,12 @@ class DictationSession:
         if turbo is None:
             return False
 
-        # Build Turbo feed: overlap + current chunk, then AGC only.
-        # noisereduce is intentionally disabled on the streaming path — stationary=False
-        # spectral subtraction distorts quiet consonants and degrades Turbo WER.
+        # Build Turbo feed: overlap + current chunk. AGC and NR are configurable via settings.
         raw_feed = np.concatenate([overlap, chunk]) if len(overlap) else chunk.copy()
-        feed = apply_agc(raw_feed)
+        audio_settings = _read_audio_settings()
+        feed = apply_agc(raw_feed) if audio_settings.get("agc_enabled", True) else raw_feed
+        if audio_settings.get("noise_reduction_enabled", False):
+            feed = suppress_noise(feed, SAMPLE_RATE)
 
         vocab_prompt = self._get_vocab_prompt()
         try:
