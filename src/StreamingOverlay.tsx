@@ -126,7 +126,6 @@ export const CAPSULE: React.CSSProperties = {
   background: "rgba(255, 255, 255, 0.96)",
   borderRadius: 999,
   border: "1px solid rgba(43, 54, 62, 0.12)",
-  boxShadow: "0 4px 14px rgba(41, 52, 61, 0.18)",
   color: "#1d2329",
   fontFamily: "system-ui, -apple-system, sans-serif",
   fontSize: 13,
