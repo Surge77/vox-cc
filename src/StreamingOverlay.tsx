@@ -263,10 +263,12 @@ export function useWaveformAnimation(
 
 function OverlayCard({
   status,
+  partial,
   degraded,
   barsRef,
 }: {
   status: AppStatus;
+  partial: string;
   degraded: string[];
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
@@ -304,10 +306,27 @@ function OverlayCard({
     status === "recording" ||
     status === "streaming"
   ) {
+    const displayText = partial || "Listening…";
+    const isListening = !partial;
+
     return (
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
         <div className="vox-icon-x" />
-        <WaveformBars barsRef={barsRef} />
+        {isListening ? (
+          <WaveformBars barsRef={barsRef} />
+        ) : (
+          <span
+            style={{
+              flex: "1 1 auto",
+              minWidth: 84,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {displayText}
+          </span>
+        )}
         <span
           style={{
             color: "#5a6470",
@@ -317,7 +336,7 @@ function OverlayCard({
             letterSpacing: "0.01em",
           }}
         >
-          Listening…
+          {isListening ? "Listening…" : ""}
         </span>
       </div>
     );
@@ -348,6 +367,7 @@ function OverlayCard({
 
 export default function StreamingOverlay({
   status,
+  partial,
   degraded,
   levelRef,
   lastLevelTimeRef,
@@ -371,7 +391,12 @@ export default function StreamingOverlay({
           background: "transparent",
         }}
       >
-        <OverlayCard status={status} degraded={degraded} barsRef={barsRef} />
+        <OverlayCard
+          status={status}
+          partial={partial}
+          degraded={degraded}
+          barsRef={barsRef}
+        />
       </div>
     </>
   );
