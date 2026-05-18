@@ -6,7 +6,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if getattr(sys, "frozen", False):
+    BASE = os.path.dirname(sys.executable)  # dist/sidecar/ — models/ is sibling to exe
+else:
+    BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 
 DISTIL_MODEL_ID = "Systran/faster-distil-whisper-large-v3"

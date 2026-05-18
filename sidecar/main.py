@@ -17,7 +17,10 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, "frozen", False):
+    BASE = os.path.dirname(sys.executable)  # dist/sidecar/ — models/ is sibling to exe, not inside _internal/
+else:
+    BASE = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 DATA_DIR = os.path.join(os.path.expanduser("~"), ".vox", "data")
 

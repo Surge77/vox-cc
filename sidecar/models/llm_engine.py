@@ -1,7 +1,10 @@
 import os
 import sys
 
-BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if getattr(sys, "frozen", False):
+    BASE = os.path.dirname(sys.executable)  # dist/sidecar/ — models/ is sibling to exe
+else:
+    BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 LLM_FILENAME = "qwen2.5-3b-instruct-q4_k_m.gguf"
 LLM_PATH = os.path.join(MODEL_DIR, LLM_FILENAME)
