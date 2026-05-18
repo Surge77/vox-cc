@@ -1,0 +1,58 @@
+# ── ML models (GBs of binary data — never read by Claude) ──────────────────
+sidecar/models/
+sidecar/models--*/
+**/*.gguf
+**/*.bin
+**/*.safetensors
+**/*.npy
+**/*.pt
+**/*.pth
+**/*.ckpt
+
+# ── Python venv & build output ───────────────────────────────────────────────
+sidecar/.venv/
+sidecar/dist/
+sidecar/build/
+sidecar/__pycache__/
+sidecar/**/__pycache__/
+**/*.pyc
+**/*.pyo
+sidecar/*.egg-info/
+
+# ── Rust build artifacts ─────────────────────────────────────────────────────
+src-tauri/target/
+
+# ── Frontend build & deps ────────────────────────────────────────────────────
+node_modules/
+dist/
+
+# ── Runtime data (training data, logs, settings) ─────────────────────────────
+sidecar/data/
+**/*.jsonl
+**/*.lock
+
+# ── Large compiled binaries ───────────────────────────────────────────────────
+src-tauri/binaries/
+**/*.exe
+**/*.dll
+**/*.so
+**/*.pyd
+
+# ── Windows crash dumps & scratch files ──────────────────────────────────────
+bash.exe.stackdump
+*.stackdump
+
+# ── Prototype HTML files (not part of main app) ──────────────────────────────
+stt-capsule-loaders.html
+waveform-loader-capsules.html
+
+# ── Global config (not project code) ─────────────────────────────────────────
+global-claude-config/
+
+# ── Tauri icons (binary) ──────────────────────────────────────────────────────
+src-tauri/icons/
+
+# ── Training output dirs ──────────────────────────────────────────────────────
+sidecar/training_output/
+sidecar/ct2-model/
+sidecar/lora-merged/

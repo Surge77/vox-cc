@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import logging
+import signal
 import socket
 import asyncio
 import warnings
@@ -16,7 +17,7 @@ import uvicorn
 from fastapi import FastAPI
 
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(BASE, "models")
+MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 DATA_DIR = os.path.join(os.path.expanduser("~"), ".vox", "data")
 
 # Module-level state — routers import these at call time to avoid circular imports
@@ -28,7 +29,33 @@ _session_active: bool = False
 _training_active: bool = False
 _turbo_model_ref: list = [None]  # list so M3 distil_sequential can null it in place
 _llm_ref: list = [None]
+_llm_loading: bool = False       # True while LLM loads in background; health reports llm:true during this window
 _pending_audio_uuid: str | None = None  # set by terminate_stream when collection on; cleared by /process-text
+
+
+PID_LOCK = os.path.join(os.path.expanduser("~"), ".vox", "data", "sidecar.pid")
+
+
+def kill_previous_sidecar() -> None:
+    """Kill any previous sidecar holding VRAM. Must run before VRAM detection."""
+    try:
+        with open(PID_LOCK) as f:
+            old_pid = int(f.read().strip())
+        if old_pid == os.getpid():
+            return
+        try:
+            os.kill(old_pid, signal.SIGTERM)
+            print(f"Killed previous sidecar (PID {old_pid}) — waiting for VRAM release...")
+            import time
+            time.sleep(1.5)  # GPU driver needs ~1s to reclaim CUDA context after process dies
+        except (ProcessLookupError, OSError):
+            pass  # Already dead
+    except (FileNotFoundError, ValueError):
+        pass  # No previous PID file
+    finally:
+        os.makedirs(os.path.dirname(PID_LOCK), exist_ok=True)
+        with open(PID_LOCK, "w") as f:
+            f.write(str(os.getpid()))
 
 
 def get_vram_free_mb() -> int:
@@ -79,8 +106,9 @@ def read_port_lock() -> int | None:
         return None
 
 
-def startup() -> None:
-    global _load_plan, _vram_free_mb, _cuda_available, _models_state, _turbo_model_ref, _llm_ref
+def startup_critical() -> None:
+    """Load Turbo + verify distil files exist. Returns quickly (~10-15s). LLM loads in background after."""
+    global _load_plan, _vram_free_mb, _cuda_available, _models_state, _turbo_model_ref
 
     try:
         import torch
@@ -149,39 +177,68 @@ def startup() -> None:
         print(f"WARNING: Turbo load failed: {e}", file=sys.stderr)
         _models_state["turbo"] = False
 
-    if _load_plan.get("final_pass") == "distil_sequential":
-        try:
-            from models.dual_loader import load_distil
-            import gc
-            print("Verifying distil-large-v3 (may download on first run)...")
-            distil_check = load_distil()
-            del distil_check
-            gc.collect()
-            import torch as _torch
-            _torch.cuda.empty_cache()
-            _models_state["final_pass"] = True
-            print("distil-large-v3 verified.")
-        except Exception as e:
-            print(f"WARNING: distil-large-v3 unavailable: {e}", file=sys.stderr)
-            _models_state["final_pass"] = False
+    try:
+        from audio.vad import prewarm_silero
+        prewarm_silero()
+        print("Silero VAD prewarmed.")
+    except Exception as e:
+        print(f"WARNING: Silero VAD prewarm failed: {e}", file=sys.stderr)
 
-    if _load_plan.get("llm") in ("cuda", "cpu"):
-        try:
-            from models.llm_engine import load_llm, prewarm_llm
-            llm_path = os.path.join(MODEL_DIR, "qwen2.5-3b-instruct-q4_k_m.gguf")
-            if os.path.isfile(llm_path):
-                print("Loading LLM...")
-                _llm_ref[0] = load_llm()
-                _models_state["llm"] = True
-                print("LLM loaded. Prewarming...")
-                prewarm_llm(_llm_ref[0])
-                print("LLM prewarmed.")
-            else:
-                print(f"WARNING: LLM model not found at {llm_path}", file=sys.stderr)
-                _models_state["llm"] = False
-        except Exception as e:
-            print(f"WARNING: LLM load failed: {e}", file=sys.stderr)
+    if _load_plan.get("final_pass") == "skip":
+        # Intentional — VRAM < 3000MB, Turbo-only mode. Not a failure.
+        _models_state["final_pass"] = True
+
+    elif _load_plan.get("final_pass") == "distil_sequential":
+        # File-existence check only — no trial load. Loading 1.5GB just to verify files is wasteful.
+        # faster-whisper stores HF downloads as models--{org}--{name} inside MODEL_DIR.
+        distil_ct2 = os.path.join(MODEL_DIR, "models--Systran--faster-distil-whisper-large-v3")
+        if os.path.isdir(distil_ct2):
+            _models_state["final_pass"] = True
+            print("distil-large-v3 files verified.")
+        else:
+            # First run: pre-download so first terminate_stream doesn't block on download
+            try:
+                from models.dual_loader import load_distil
+                import gc
+                print("Downloading distil-large-v3 (first run)...")
+                distil_check = load_distil()
+                del distil_check
+                gc.collect()
+                import torch as _torch
+                _torch.cuda.empty_cache()
+                _models_state["final_pass"] = True
+                print("distil-large-v3 downloaded.")
+            except Exception as e:
+                print(f"WARNING: distil-large-v3 unavailable: {e}", file=sys.stderr)
+                _models_state["final_pass"] = False
+
+
+def startup_llm() -> None:
+    """Load LLM in background after Turbo is ready. Sets _llm_loading during this window."""
+    global _models_state, _llm_ref, _llm_loading
+
+    if _load_plan.get("llm") not in ("cuda", "cpu"):
+        return
+
+    _llm_loading = True
+    try:
+        from models.llm_engine import load_llm, prewarm_llm
+        llm_path = os.path.join(MODEL_DIR, "qwen2.5-3b-instruct-q4_k_m.gguf")
+        if os.path.isfile(llm_path):
+            print("Loading LLM (background)...")
+            _llm_ref[0] = load_llm()
+            _models_state["llm"] = True
+            print("LLM loaded. Prewarming...")
+            prewarm_llm(_llm_ref[0])
+            print("LLM prewarmed.")
+        else:
+            print(f"WARNING: LLM model not found at {llm_path}", file=sys.stderr)
             _models_state["llm"] = False
+    except Exception as e:
+        print(f"WARNING: LLM load failed: {e}", file=sys.stderr)
+        _models_state["llm"] = False
+    finally:
+        _llm_loading = False
 
 
 def cleanup() -> None:
@@ -190,7 +247,13 @@ def cleanup() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await asyncio.to_thread(startup)
+    global _llm_loading
+    # Critical path: Turbo + distil file check (~10-15s). Unblocks health endpoint.
+    await asyncio.to_thread(startup_critical)
+    # Set flag BEFORE yield so the first health poll after startup sees llm:true.
+    # Without this, a poll between yield and task-start sees llm=false → sidecar-degraded.
+    _llm_loading = True
+    asyncio.create_task(asyncio.to_thread(startup_llm))
     yield
     cleanup()
 
@@ -210,6 +273,7 @@ app.include_router(finetuning_router)
 
 
 if __name__ == "__main__":
+    kill_previous_sidecar()  # free VRAM before detecting it
     port = find_free_port()
     write_port_lock(port)
     print(f"Starting sidecar on port {port}")

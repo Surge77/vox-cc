@@ -2,7 +2,7 @@ import os
 import sys
 
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODEL_DIR = os.path.join(BASE, "models")
+MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 LLM_FILENAME = "qwen2.5-3b-instruct-q4_k_m.gguf"
 LLM_PATH = os.path.join(MODEL_DIR, LLM_FILENAME)
 

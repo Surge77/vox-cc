@@ -2,3 +2,4 @@
 pub const MODELS_READY: &str = "models-ready";
 pub const SIDECAR_DEGRADED: &str = "sidecar-degraded";
 pub const SIDECAR_RESTARTING: &str = "sidecar-restarting";
+pub const SIDECAR_PORT: &str = "sidecar-port";

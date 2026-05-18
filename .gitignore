@@ -55,6 +55,7 @@ desktop.ini
 .claude/
 *.stackdump
 **/CLAUDE.md
+**/CLAUDE.local.md
 
 # Local preview/prototype pages
 *loader*.html

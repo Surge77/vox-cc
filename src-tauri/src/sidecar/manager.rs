@@ -22,8 +22,15 @@ pub fn spawn_sidecar(
             .join("dist")
             .join("sidecar")
             .join("sidecar.exe");
+        let model_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("sidecar")
+            .join("models")
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from("sidecar/models"));
         app.shell()
             .command(exe.to_str().unwrap_or("sidecar.exe"))
+            .env("VOX_MODEL_DIR", model_dir.to_str().unwrap_or(""))
             .spawn()
             .map_err(|e| e.to_string())
     }
@@ -88,8 +95,13 @@ pub async fn await_sidecar_ready(app: tauri::AppHandle) {
                     println!("[vox] health-poll: OK after {} polls — body: {}", poll_count, body);
                     let models = &body["models"];
 
+                    let final_pass_type = body["final_pass_type"].as_str().unwrap_or("");
                     let mut missing: Vec<String> = Vec::new();
-                    if models["final_pass"] != true {
+                    if models["turbo"] != true {
+                        missing.push("turbo".into());
+                    }
+                    // "skip" means VRAM too low for a final-pass model — intentional, not a failure.
+                    if models["final_pass"] != true && final_pass_type != "skip" {
                         missing.push("final_pass".into());
                     }
                     if models["llm"] != true {
@@ -105,7 +117,9 @@ pub async fn await_sidecar_ready(app: tauri::AppHandle) {
                         .ok();
                     }
 
-                    println!("[vox] health-poll: emitting models-ready");
+                    // Emit exact port so frontend WS connects to the right port without scanning
+                    app.emit(super::events::SIDECAR_PORT, serde_json::json!({ "port": port })).ok();
+                    println!("[vox] health-poll: emitting models-ready (port={})", port);
                     app.emit(super::events::MODELS_READY, ()).ok();
                     return;
                 } else {

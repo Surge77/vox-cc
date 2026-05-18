@@ -8,9 +8,13 @@ router = APIRouter()
 async def health():
     import main as app_state
     final_pass_type = app_state._load_plan.get("final_pass", "skip")
+    models = dict(app_state._models_state)
+    # Report llm:true while LLM is still loading in background — prevents premature sidecar-degraded
+    if app_state._llm_loading:
+        models["llm"] = True
     return {
         "status": "ok",
-        "models": dict(app_state._models_state),
+        "models": models,
         "final_pass_type": final_pass_type,
         "cuda": app_state._cuda_available,
         "vram_free_mb": app_state._vram_free_mb,

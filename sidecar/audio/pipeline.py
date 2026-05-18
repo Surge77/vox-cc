@@ -78,19 +78,18 @@ class DictationSession:
         if total >= MAX_SAMPLES:
             return True
 
-        # AGC: normalize gain so quiet mics aren't dropped by VAD
-        chunk_agc = apply_agc(chunk)
-
-        # Skip Turbo on silent/non-speech chunks (Silero VAD)
-        if not should_transcribe(chunk_agc):
+        # VAD on raw chunk — Silero sees real signal energy, not amplified noise
+        if not should_transcribe(chunk):
             return False
 
         turbo = self._turbo_ref[0]
         if turbo is None:
             return False
 
-        # build feed: overlap + AGC'd current, then suppress noise on full feed
-        feed = np.concatenate([overlap, chunk_agc]) if len(overlap) else chunk_agc.copy()
+        # Build raw feed first (overlap + current chunk both raw), then AGC the full feed.
+        # AGC'ing overlap+chunk together keeps gain consistent across the context window.
+        raw_feed = np.concatenate([overlap, chunk]) if len(overlap) else chunk.copy()
+        feed = apply_agc(raw_feed)
         feed = suppress_noise(feed, SAMPLE_RATE)
 
         vocab_prompt = load_vocabulary_prompt()

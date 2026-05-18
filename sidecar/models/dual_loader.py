@@ -1,10 +1,13 @@
 import gc
+import logging
 import os
 import sys
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODEL_DIR = os.path.join(BASE, "models")
+MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
 
 DISTIL_MODEL_ID = "Systran/faster-distil-whisper-large-v3"
 
@@ -57,8 +60,10 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
             initial_prompt=vocab_prompt or None,
         )
         result = " ".join(seg.text.strip() for seg in segments)
+        logger.info("distil final pass: %d chars, audio %.1fs", len(result), len(audio_np) / 16000)
 
     except Exception:
+        logger.exception("distil final pass failed — falling back to Turbo text")
         result = ""
 
     finally:

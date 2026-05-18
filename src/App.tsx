@@ -59,7 +59,7 @@ interface ProcessTextRequest {
 // ── Port discovery ─────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 8000;
-let sidecarPort = DEFAULT_PORT;
+let sidecarPort = 0; // deferred — set by sidecar-port event before WS connects
 
 async function discoverSidecarPort(): Promise<number> {
   console.log("[vox] port-discovery: scanning 8000-8009...");
@@ -106,7 +106,8 @@ const WS_URL = () => `ws://127.0.0.1:${sidecarPort}/ws/dictation`;
 function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "MODELS_READY":
-      if (state.status === "waiting_for_models") return { status: "idle" };
+      if (state.status === "waiting_for_models" || state.status === "degraded")
+        return { status: "idle" };
       return state;
     case "MODELS_DEGRADED":
       return { status: "degraded", missing: action.missing };
@@ -148,6 +149,8 @@ function reducer(state: AppState, action: AppAction): AppState {
 const BAR_MULTIPLIERS = [
   0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.4, 0.25, 0.52, 0.88,
 ];
+// Each bar oscillates at its own period (ms). Prime-ish values prevent synchronisation.
+const BAR_SPEEDS = [127, 97, 73, 113, 83, 139, 67, 103, 151, 89, 109];
 const NUM_BARS = BAR_MULTIPLIERS.length;
 const MIN_BAR_H = 4;
 const MAX_BAR_H = 28;
@@ -440,12 +443,15 @@ function useWebSocket(
   onHandoff: (transcript: string) => void,
   levelRef: React.MutableRefObject<number>,
   lastLevelTimeRef: React.MutableRefObject<number>,
+  speechDetectedRef: React.MutableRefObject<boolean>,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const retryDelayRef = useRef(500);
+  const activeRef = useRef(true);
 
   const connect = useCallback(() => {
+    if (sidecarPort === 0) return; // port not known yet — wait for sidecar-port event
     const url = WS_URL();
     console.log(`[vox] ws: connecting to ${url}`);
     const ws = new WebSocket(url);
@@ -467,6 +473,8 @@ function useWebSocket(
       if (msg.type === "audio_level" && typeof msg.level === "number") {
         levelRef.current = msg.level;
         lastLevelTimeRef.current = Date.now();
+        // level = rms * 8 (scaled in dictation.py). Threshold 0.064 = raw RMS 0.008 × 8 scale.
+        if (msg.level > 0.064) speechDetectedRef.current = true;
         return; // high-frequency, no logging
       }
 
@@ -496,6 +504,7 @@ function useWebSocket(
     };
 
     ws.onclose = (e) => {
+      if (!activeRef.current) return; // component unmounted — stop reconnect loop
       const delay = Math.min(30000, retryDelayRef.current);
       console.log(
         `[vox] ws: closed (code=${e.code}), reconnecting in ${delay}ms`,
@@ -503,14 +512,28 @@ function useWebSocket(
       retryDelayRef.current = delay * 2;
       retryTimerRef.current = setTimeout(connect, delay);
     };
-  }, [dispatch, onHandoff, levelRef, lastLevelTimeRef]);
+  }, [dispatch, onHandoff, levelRef, lastLevelTimeRef, speechDetectedRef]);
 
   useEffect(() => {
+    activeRef.current = true;
     connect();
     return () => {
+      activeRef.current = false;
       wsRef.current?.close();
       clearTimeout(retryTimerRef.current);
     };
+  }, [connect]);
+
+  const forceReconnect = useCallback(() => {
+    clearTimeout(retryTimerRef.current);
+    retryDelayRef.current = 500;
+    const ws = wsRef.current;
+    if (ws) {
+      ws.onclose = null; // prevent exponential backoff from kicking in
+      ws.close();
+      wsRef.current = null;
+    }
+    connect();
   }, [connect]);
 
   const sendWs = useCallback((msg: string) => {
@@ -542,7 +565,7 @@ function useWebSocket(
     sendWs(JSON.stringify({ command: "cancel_stream" }));
   }, [sendWs]);
 
-  return { wsRef, beginStream, terminateStream, cancelStream };
+  return { wsRef, beginStream, terminateStream, cancelStream, forceReconnect };
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -565,34 +588,46 @@ export default function App() {
   const smoothedRef = useRef(0);
   const rafRef = useRef<number>();
   const contextRef = useRef<DeepContextPayload | null>(null);
+  const speechDetectedRef = useRef(false);
+  const recordingStartTimeRef = useRef(0);
 
   // RAF loop: runs at 60fps, drives bar heights from real audio amplitude
   useEffect(() => {
     const animate = () => {
       const t = Date.now();
       const hasRealLevel = t - lastLevelTimeRef.current < 400;
-      const target = hasRealLevel
-        ? levelRef.current
-        : Math.abs(Math.sin(t / 900)) * 0.04; // subtle idle breathing
+      // Speech RMS is typically 0.01–0.1 — amplify 8× so bars use full range on normal speech.
+      const raw = hasRealLevel ? levelRef.current * 8 : 0;
+      const amplified = Math.min(1.0, raw);
 
-      // Asymmetric smoothing: snappy attack (2 frames to 75%), graceful decay (~6 frames)
-      if (target > smoothedRef.current) {
-        smoothedRef.current = smoothedRef.current * 0.45 + target * 0.55;
+      // Fast attack so bars jump on speech onset; slow decay so they ease down naturally.
+      if (amplified > smoothedRef.current) {
+        smoothedRef.current = smoothedRef.current * 0.2 + amplified * 0.8;
       } else {
-        smoothedRef.current = smoothedRef.current * 0.82 + target * 0.18;
+        smoothedRef.current = smoothedRef.current * 0.88 + amplified * 0.12;
       }
       const s = smoothedRef.current;
 
+      // baseActivity keeps bars moving even at silence (0.18 floor = gentle idle)
+      // and scales to full range when speaking.
+      const baseActivity = 0.18 + s * 0.82;
+
       barsRef.current.forEach((bar, i) => {
         if (!bar) return;
-        // Each bar oscillates at its own phase — independent organic movement proportional to level
-        const phase = (i / NUM_BARS) * Math.PI * 2;
-        const wiggle = Math.sin(t / 110 + phase) * 0.2 * s;
-        const barLevel = Math.max(0, Math.min(1, s + wiggle));
-        // Peak height is bar's EQ profile position; all bars animate from MIN to their peak
+        const spd = BAR_SPEEDS[i];
+        const ph1 = (i / NUM_BARS) * Math.PI * 2;
+        const ph2 = ph1 + 2.1; // offset second harmonic so bars look independent
+
+        // Two-frequency compound wave — breaks mechanical regularity
+        const osc =
+          Math.sin(t / spd + ph1) * 0.65 +
+          Math.sin(t / (spd * 1.6) + ph2) * 0.35;
+        // osc ∈ [–1, 1] → normalise to [0, 1]
+        const norm = (osc + 1) / 2;
+
         const peak = MIN_BAR_H + BAR_MULTIPLIERS[i] * (MAX_BAR_H - MIN_BAR_H);
-        const h = MIN_BAR_H + barLevel * (peak - MIN_BAR_H);
-        bar.style.height = `${h}px`;
+        const h = MIN_BAR_H + norm * baseActivity * (peak - MIN_BAR_H);
+        bar.style.height = `${Math.max(MIN_BAR_H, h)}px`;
       });
 
       rafRef.current = requestAnimationFrame(animate);
@@ -606,6 +641,15 @@ export default function App() {
 
   const handleHandoff = useCallback(
     async (canaryTranscript: string) => {
+      if (!canaryTranscript.trim()) {
+        // Final pass returned nothing — sidecar processed silence, skip injection.
+        console.log(
+          "[vox] handleHandoff: empty transcript, skipping injection",
+        );
+        contextRef.current = null;
+        dispatch({ type: "INJECTION_DONE" });
+        return;
+      }
       const ctx = contextRef.current;
       const body: ProcessTextRequest = {
         raw_transcript: canaryTranscript,
@@ -653,12 +697,14 @@ export default function App() {
     [dispatch],
   );
 
-  const { beginStream, terminateStream, cancelStream } = useWebSocket(
-    dispatch,
-    handleHandoff,
-    levelRef,
-    lastLevelTimeRef,
-  );
+  const { beginStream, terminateStream, cancelStream, forceReconnect } =
+    useWebSocket(
+      dispatch,
+      handleHandoff,
+      levelRef,
+      lastLevelTimeRef,
+      speechDetectedRef,
+    );
 
   // Tauri event listeners
   useEffect(() => {
@@ -686,6 +732,8 @@ export default function App() {
             levelRef.current = 0;
             lastLevelTimeRef.current = 0;
             smoothedRef.current = 0;
+            speechDetectedRef.current = false;
+            recordingStartTimeRef.current = Date.now();
             beginStream();
             dispatch({ type: "START_RECORDING" });
           } else {
@@ -702,9 +750,41 @@ export default function App() {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
           if (s === "recording" || s === "streaming") {
-            console.log("[vox] hotkey-released: terminating stream");
-            terminateStream();
-            dispatch({ type: "STOP_RECORDING" });
+            const elapsed = Date.now() - recordingStartTimeRef.current;
+            const partial =
+              s === "streaming"
+                ? (
+                    stateRef.current as {
+                      status: "streaming";
+                      partial: string;
+                    }
+                  ).partial.trim()
+                : "";
+            // Cancel only when ALL THREE conditions hold:
+            //   1. No audio_level event exceeded 0.064 scaled level (≈ 0.008 raw RMS)
+            //   2. No non-empty partial text from Turbo
+            //   3. Held long enough (>1200ms) for at least one Turbo chunk to have returned
+            // If ANY condition is false we terminate normally and let the sidecar decide.
+            const isSilent =
+              !speechDetectedRef.current && !partial && elapsed > 1200;
+            if (isSilent) {
+              console.log(
+                `[vox] hotkey-released: silence — no audio, no partial, elapsed=${elapsed}ms, cancelling`,
+              );
+              cancelStream();
+              dispatch({ type: "CANCEL_RECORDING" });
+            } else {
+              console.log(
+                `[vox] hotkey-released: speech present — audio=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}", elapsed=${elapsed}ms, terminating`,
+              );
+              terminateStream();
+              dispatch({ type: "STOP_RECORDING" });
+            }
+          } else if (s === "waiting_for_models" || s === "degraded") {
+            // Hotkey pressed while models still loading — park window immediately
+            getCurrentWindow()
+              .setPosition(new LogicalPosition(-10000, -10000))
+              .catch(() => {});
           } else {
             console.log(
               `[vox] hotkey-released: no stream to stop (state=${s})`,
@@ -713,10 +793,23 @@ export default function App() {
         }),
       );
 
+      // Rust emits sidecar-port before models-ready — this is the authoritative port source
+      cleanups.push(
+        await listen<{ port: number }>("sidecar-port", (e) => {
+          console.log(`[vox] event: sidecar-port = ${e.payload.port}`);
+          sidecarPort = e.payload.port;
+          forceReconnect();
+        }),
+      );
+
       cleanups.push(
         await listen<null>("models-ready", async () => {
-          console.log("[vox] event: models-ready — discovering port...");
-          sidecarPort = await discoverSidecarPort();
+          console.log("[vox] event: models-ready");
+          if (sidecarPort === 0) {
+            // sidecar-port event didn't fire yet — fall back to scanning
+            sidecarPort = await discoverSidecarPort();
+            forceReconnect();
+          }
           dispatch({ type: "MODELS_READY" });
         }),
       );
@@ -733,12 +826,10 @@ export default function App() {
       );
 
       cleanups.push(
-        await listen<null>("sidecar-restarting", async () => {
-          console.log(
-            "[vox] event: sidecar-restarting, re-discovering port...",
-          );
+        await listen<null>("sidecar-restarting", () => {
+          console.log("[vox] event: sidecar-restarting, resetting port...");
+          sidecarPort = 0; // reset — sidecar-port event will set the new port on restart
           dispatch({ type: "SIDECAR_RESTARTING" });
-          sidecarPort = await discoverSidecarPort();
         }),
       );
     };
@@ -751,12 +842,13 @@ export default function App() {
           `[vox] post-register: sidecar already ready on port ${port}`,
         );
         sidecarPort = port;
+        forceReconnect();
         dispatch({ type: "MODELS_READY" });
       }
     });
 
     return () => cleanups.forEach((fn) => fn());
-  }, [beginStream, cancelStream, terminateStream]);
+  }, [beginStream, cancelStream, terminateStream, forceReconnect]);
 
   // ERROR auto-reset after 4s
   useEffect(() => {

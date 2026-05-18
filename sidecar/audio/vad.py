@@ -121,6 +121,11 @@ def is_hallucination(transcript: str, audio_duration_s: float) -> bool:
     return False
 
 
+def prewarm_silero() -> None:
+    """Pre-load Silero VAD during startup so the first recording doesn't stall 2-3s on model load."""
+    _load_silero()
+
+
 def suppress_noise(audio: np.ndarray, rate: int) -> np.ndarray:
     """Apply noise reduction. Uses a gentler setting than before (0.5 vs 0.75)
     to avoid destroying speech harmonics and sibilants."""
