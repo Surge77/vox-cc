@@ -324,7 +324,21 @@ function OverlayCard({
   }
 
   if (status === "finalizing" || status === "injecting") {
-    return null; // processing happens silently — capsule hides on stream_stopped
+    return (
+      <div className="vox-capsule" style={CAPSULE}>
+        <Spinner />
+        <span
+          style={{
+            color: "#5a6470",
+            fontSize: 12,
+            fontWeight: 500,
+            letterSpacing: "0.01em",
+          }}
+        >
+          {status === "finalizing" ? "Processing…" : "Injecting…"}
+        </span>
+      </div>
+    );
   }
 
   return null;
