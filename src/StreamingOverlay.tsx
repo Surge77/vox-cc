@@ -271,12 +271,7 @@ function OverlayCard({
   degraded: string[];
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
-  if (
-    status === "idle" ||
-    status === "capturing" ||
-    status === "waiting_for_models"
-  )
-    return null;
+  if (status === "idle" || status === "waiting_for_models") return null;
 
   if (status === "degraded") {
     return (
@@ -305,7 +300,11 @@ function OverlayCard({
     );
   }
 
-  if (status === "recording" || status === "streaming") {
+  if (
+    status === "capturing" ||
+    status === "recording" ||
+    status === "streaming"
+  ) {
     return (
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
         <div className="vox-icon-x" />

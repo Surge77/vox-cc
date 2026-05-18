@@ -186,6 +186,9 @@ function useWebSocket(
   const retryTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const retryDelayRef = useRef(500);
   const activeRef = useRef(true);
+  // Fallback: if sidecar doesn't send stream_started, first audio_level promotes
+  // capturing → recording so the capsule isn't stuck invisible.
+  const streamStartedRef = useRef(false);
 
   const connect = useCallback(() => {
     if (sidecarPort === 0) return; // port not known yet — wait for sidecar-port event
@@ -212,6 +215,12 @@ function useWebSocket(
         lastLevelTimeRef.current = Date.now();
         // level = rms * 8 (scaled in dictation.py). Threshold 0.064 = raw RMS 0.008 × 8 scale.
         if (msg.level > 0.064) speechDetectedRef.current = true;
+        // Fallback for older sidecar builds that don't send stream_started:
+        // first audio_level proves capture is active — promote capturing → recording.
+        if (!streamStartedRef.current) {
+          streamStartedRef.current = true;
+          dispatch({ type: "STREAM_STARTED" });
+        }
         return; // high-frequency, no logging
       }
 
@@ -302,6 +311,7 @@ function useWebSocket(
   }, []);
 
   const beginStream = useCallback(() => {
+    streamStartedRef.current = false; // reset per-session so fallback fires again
     let deviceIndex: number | null = null;
     try {
       const raw = localStorage.getItem("vox_settings");
