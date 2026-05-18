@@ -272,22 +272,7 @@ function OverlayCard({
 }) {
   if (status === "idle") return null;
 
-  if (status === "waiting_for_models") {
-    return (
-      <div style={PEARL_PILL}>
-        <div
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: "50%",
-            background: "#d97706",
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ color: "#5a6470" }}>Starting…</span>
-      </div>
-    );
-  }
+  if (status === "waiting_for_models") return null;
 
   if (status === "degraded") {
     return (
