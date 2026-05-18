@@ -10,6 +10,7 @@ type AppState =
   | { status: "waiting_for_models" }
   | { status: "degraded"; missing: string[] }
   | { status: "idle" }
+  | { status: "capturing" }
   | { status: "recording" }
   | { status: "streaming"; partial: string }
   | { status: "finalizing" }
@@ -20,6 +21,8 @@ type AppAction =
   | { type: "MODELS_READY" }
   | { type: "MODELS_DEGRADED"; missing: string[] }
   | { type: "START_RECORDING" }
+  | { type: "STREAM_STARTED" }
+  | { type: "STREAM_STOPPED" }
   | { type: "STOP_RECORDING" }
   | { type: "CANCEL_RECORDING" }
   | { type: "PARTIAL_UPDATE"; content: string }
@@ -30,7 +33,13 @@ type AppAction =
   | { type: "RESET" };
 
 interface WsMessage {
-  type: "partial_update" | "handoff_ready" | "error" | "audio_level";
+  type:
+    | "partial_update"
+    | "handoff_ready"
+    | "error"
+    | "audio_level"
+    | "stream_started"
+    | "stream_stopped";
   content?: string;
   canary_transcript?: string;
   message?: string;
@@ -55,6 +64,7 @@ interface ProcessTextRequest {
   text_succeeding_cursor: string;
   use_local_llm: boolean;
   custom_vocabulary: string[];
+  style?: string;
 }
 
 // ── Port discovery ─────────────────────────────────────────────────────────────
@@ -113,18 +123,37 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "MODELS_DEGRADED":
       return { status: "degraded", missing: action.missing };
     case "START_RECORDING":
-      if (state.status === "idle") return { status: "recording" };
+      if (state.status === "idle") return { status: "capturing" };
       return state;
-    case "STOP_RECORDING":
+    case "STREAM_STARTED":
+      if (state.status === "capturing") return { status: "recording" };
+      return state;
+    case "STREAM_STOPPED":
       if (state.status === "recording" || state.status === "streaming")
         return { status: "finalizing" };
       return state;
+    case "STOP_RECORDING":
+      if (
+        state.status === "capturing" ||
+        state.status === "recording" ||
+        state.status === "streaming"
+      )
+        return { status: "finalizing" };
+      return state;
     case "CANCEL_RECORDING":
-      if (state.status === "recording" || state.status === "streaming")
+      if (
+        state.status === "capturing" ||
+        state.status === "recording" ||
+        state.status === "streaming"
+      )
         return { status: "idle" };
       return state;
     case "PARTIAL_UPDATE":
-      if (state.status === "recording" || state.status === "streaming")
+      if (
+        state.status === "capturing" ||
+        state.status === "recording" ||
+        state.status === "streaming"
+      )
         return { status: "streaming", partial: action.content };
       return state;
     case "HANDOFF_READY":
@@ -184,6 +213,15 @@ function useWebSocket(
         // level = rms * 8 (scaled in dictation.py). Threshold 0.064 = raw RMS 0.008 × 8 scale.
         if (msg.level > 0.064) speechDetectedRef.current = true;
         return; // high-frequency, no logging
+      }
+
+      if (msg.type === "stream_started") {
+        dispatch({ type: "STREAM_STARTED" });
+        return;
+      }
+      if (msg.type === "stream_stopped") {
+        dispatch({ type: "STREAM_STOPPED" });
+        return;
       }
 
       console.log("[vox] ws: message received", msg.type, msg);
@@ -324,6 +362,16 @@ export default function App() {
         return;
       }
       const ctx = contextRef.current;
+      const storedSettings = (() => {
+        try {
+          return JSON.parse(localStorage.getItem("vox_settings") ?? "{}") as {
+            defaultStyle?: string;
+            useLlm?: boolean;
+          };
+        } catch {
+          return {};
+        }
+      })();
       const body: ProcessTextRequest = {
         raw_transcript: canaryTranscript,
         context_string: ctx?.window_title ?? "",
@@ -332,8 +380,9 @@ export default function App() {
         inferred_extension: ctx?.inferred_extension ?? null,
         text_preceding_cursor: ctx?.text_preceding_cursor ?? "",
         text_succeeding_cursor: ctx?.text_succeeding_cursor ?? "",
-        use_local_llm: true,
+        use_local_llm: storedSettings.useLlm ?? true,
         custom_vocabulary: [],
+        style: storedSettings.defaultStyle ?? "auto",
       };
 
       let textToInject = canaryTranscript;
@@ -388,7 +437,7 @@ export default function App() {
         await listen<null>("hotkey-pressed", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-pressed (state=${s})`);
-          if (s === "recording" || s === "streaming") {
+          if (s === "capturing" || s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-pressed: cancelling");
             cancelStream();
             dispatch({ type: "CANCEL_RECORDING" });
@@ -427,7 +476,7 @@ export default function App() {
         await listen<null>("hotkey-released", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
-          if (s === "recording" || s === "streaming") {
+          if (s === "capturing" || s === "recording" || s === "streaming") {
             const elapsed = Date.now() - recordingStartTimeRef.current;
             const partial =
               s === "streaming"

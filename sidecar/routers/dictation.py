@@ -85,6 +85,7 @@ async def dictation_ws(ws: WebSocket):
                 session = DictationSession(state._turbo_model_ref, state._load_plan)
                 session.open_mic(device_index=device_index)
                 capture_task = asyncio.ensure_future(_capture_loop(session, ws, state))
+                await ws.send_json({"type": "stream_started"})
 
             elif command == "terminate_stream":
                 if session and session.is_active():
@@ -111,6 +112,7 @@ async def dictation_ws(ws: WebSocket):
                         await ws.send_json({"type": "error", "message": "No speech detected"})
                     session.reset()
                     session = None
+                await ws.send_json({"type": "stream_stopped"})
                 state._session_active = False
 
             elif command == "cancel_stream":
@@ -125,6 +127,7 @@ async def dictation_ws(ws: WebSocket):
                     session.close_stream()
                     session.reset()
                     session = None
+                await ws.send_json({"type": "stream_stopped"})
                 state._session_active = False
 
     except WebSocketDisconnect:
@@ -146,6 +149,9 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
     import numpy as np
     accumulator: list = []
     accumulated = 0
+    PRE_ROLL_SAMPLES = 4800  # 300 ms at 16 kHz — delay first Whisper call so first word isn't clipped
+    pre_roll_done = False
+    pre_roll_accumulated = 0
 
     try:
         while session.is_active():
@@ -168,6 +174,12 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
             accumulator.append(chunk)
             accumulated += len(chunk)
 
+            if not pre_roll_done:
+                pre_roll_accumulated += len(chunk)
+                if pre_roll_accumulated < PRE_ROLL_SAMPLES:
+                    continue
+                pre_roll_done = True
+
             if accumulated < CHUNK_SAMPLES:
                 continue
 
@@ -183,6 +195,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
                 final_text = await _run_final_pass(session, state, fallback)
                 result = final_text or fallback
                 try:
+                    await ws.send_json({"type": "stream_stopped"})
                     if result:
                         await ws.send_json({"type": "handoff_ready", "canary_transcript": result})
                     else:

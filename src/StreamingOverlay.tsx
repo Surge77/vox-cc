@@ -6,6 +6,7 @@ export type AppStatus =
   | "waiting_for_models"
   | "degraded"
   | "idle"
+  | "capturing"
   | "recording"
   | "streaming"
   | "finalizing"
@@ -26,8 +27,8 @@ export interface StreamingOverlayProps {
 const BAR_MULTIPLIERS = [
   0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.4, 0.25, 0.52, 0.88,
 ];
-// Each bar oscillates at its own period (ms). Prime-ish values prevent synchronisation.
-const BAR_SPEEDS = [127, 97, 73, 113, 83, 139, 67, 103, 151, 89, 109];
+// Each bar oscillates at its own period (ms). Reduced ~30% from original for more reactive animation.
+const BAR_SPEEDS = [89, 68, 51, 79, 58, 97, 47, 72, 106, 62, 76];
 const NUM_BARS = BAR_MULTIPLIERS.length;
 const MIN_BAR_H = 4;
 const MAX_BAR_H = 28;
@@ -215,8 +216,8 @@ export function useWaveformAnimation(
     const animate = () => {
       const t = Date.now();
       const hasRealLevel = t - lastLevelTimeRef.current < 400;
-      // Speech RMS is typically 0.01–0.1 — amplify 8× so bars use full range on normal speech.
-      const raw = hasRealLevel ? levelRef.current * 8 : 0;
+      // Speech RMS is typically 0.01–0.1 — amplify 12× so bars use full range on normal speech.
+      const raw = hasRealLevel ? levelRef.current * 12 : 0;
       const amplified = Math.min(1.0, raw);
 
       // Fast attack so bars jump on speech onset; slow decay so they ease down naturally.
@@ -270,9 +271,12 @@ function OverlayCard({
   degraded: string[];
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
 }) {
-  if (status === "idle") return null;
-
-  if (status === "waiting_for_models") return null;
+  if (
+    status === "idle" ||
+    status === "capturing" ||
+    status === "waiting_for_models"
+  )
+    return null;
 
   if (status === "degraded") {
     return (
@@ -321,46 +325,8 @@ function OverlayCard({
     );
   }
 
-  if (status === "finalizing") {
-    return (
-      <div className="vox-capsule" style={CAPSULE}>
-        <div className="vox-icon-x" style={{ opacity: 0.3 }} />
-        <div
-          style={{
-            flex: "1 1 auto",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 7,
-            minWidth: 84,
-          }}
-        >
-          <Spinner />
-          <span style={{ color: "#5a6470" }}>Processing…</span>
-        </div>
-        <div className="vox-icon-check" style={{ opacity: 0.3 }} />
-      </div>
-    );
-  }
-
-  if (status === "injecting") {
-    return (
-      <div className="vox-capsule" style={CAPSULE}>
-        <div className="vox-icon-x" style={{ opacity: 0.3 }} />
-        <div
-          style={{
-            flex: "1 1 auto",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            minWidth: 84,
-          }}
-        >
-          <span style={{ color: "#5a6470" }}>Done</span>
-        </div>
-        <div className="vox-icon-check" />
-      </div>
-    );
+  if (status === "finalizing" || status === "injecting") {
+    return null; // processing happens silently — capsule hides on stream_stopped
   }
 
   return null;

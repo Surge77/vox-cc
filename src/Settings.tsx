@@ -65,6 +65,7 @@ interface AudioDevice {
   index: number;
   name: string;
   default: boolean;
+  bluetooth_warning?: boolean;
 }
 
 type GroqStatus = "idle" | "testing" | "ok" | "error";
@@ -401,6 +402,13 @@ export default function Settings() {
                 </option>
               ))}
             </select>
+          )}
+          {devices.find((d) => d.index === selectedDevice)
+            ?.bluetooth_warning && (
+            <p style={{ color: "#b45309", fontSize: 12, marginTop: 4 }}>
+              Bluetooth mics add 80–150 ms latency and may clip recording
+              starts.
+            </p>
           )}
           <p style={HINT}>Takes effect on the next recording session.</p>
         </div>

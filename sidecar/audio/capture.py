@@ -24,10 +24,13 @@ def list_audio_devices() -> list[dict]:
                 name = name.encode("cp1252").decode("utf-8")
             except (UnicodeDecodeError, UnicodeEncodeError):
                 pass
+            bt_keywords = ("bluetooth", " bt ", "airpods", "airplay", "wireless")
+            is_bt = any(kw in name.lower() for kw in bt_keywords)
             devices.append({
                 "index": i,
                 "name": name,
                 "default": i == default_idx,
+                "bluetooth_warning": is_bt,
             })
     pa.terminate()
     return devices
