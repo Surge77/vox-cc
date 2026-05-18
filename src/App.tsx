@@ -191,7 +191,12 @@ function useWebSocket(
   const streamStartedRef = useRef(false);
 
   const connect = useCallback(() => {
-    if (sidecarPort === 0) return; // port not known yet — wait for sidecar-port event
+    if (sidecarPort === 0) {
+      console.log(
+        "[vox] ws: connect() skipped — sidecarPort=0, waiting for sidecar-port event",
+      );
+      return;
+    }
     const url = WS_URL();
     console.log(`[vox] ws: connecting to ${url}`);
     const ws = new WebSocket(url);
@@ -638,9 +643,15 @@ export default function App() {
   // setPosition keeps WebView2 compositor active (no reinit, no black/transparent flash).
   useEffect(() => {
     if (state.status === "idle") {
+      console.log("[vox] window: parking at -10000,-10000 (state=idle)");
       getCurrentWindow()
         .setPosition(new LogicalPosition(-10000, -10000))
-        .catch(() => {});
+        .then(() => console.log("[vox] window: parked ok"))
+        .catch((e: unknown) => console.error("[vox] window: park failed", e));
+    } else if (state.status === "capturing") {
+      console.log(
+        "[vox] window: entering capturing — Rust already moved+showed",
+      );
     }
   }, [state.status]);
 

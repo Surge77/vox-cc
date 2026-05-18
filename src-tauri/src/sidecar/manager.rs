@@ -12,24 +12,26 @@ pub fn spawn_sidecar(
     ),
     String,
 > {
-    // In dev mode, run the exe in-place so PyInstaller finds _internal/ next to it.
+    // In dev mode, spawn Python directly from venv — no PyInstaller rebuild needed on Python edits.
     // In release mode, Tauri bundles everything correctly; use the managed sidecar path.
     #[cfg(debug_assertions)]
     {
-        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let sidecar_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
-            .join("sidecar")
-            .join("dist")
-            .join("sidecar")
-            .join("sidecar.exe");
-        let model_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("sidecar")
+            .join("sidecar");
+        let python_exe = sidecar_dir
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        let model_dir = sidecar_dir
             .join("models")
             .canonicalize()
             .unwrap_or_else(|_| std::path::PathBuf::from("sidecar/models"));
+
         app.shell()
-            .command(exe.to_str().unwrap_or("sidecar.exe"))
+            .command(python_exe.to_str().unwrap_or("python.exe"))
+            .current_dir(sidecar_dir.to_str().unwrap_or("."))
+            .arg("main.py")
             .env("VOX_MODEL_DIR", model_dir.to_str().unwrap_or(""))
             .spawn()
             .map_err(|e| e.to_string())

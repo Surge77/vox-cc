@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore", message=".*symlinks.*", category=UserWarning)
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.environ.get("VOX_MODEL_DIR") or os.path.join(BASE, "models")
@@ -313,6 +314,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS — localhost-only. Allows Vite dev (localhost:1420) and Tauri WebView2 origins.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|tauri://localhost|https?://tauri\.localhost)$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 from routers.health import router as health_router
 from routers.dictation import router as dictation_router
