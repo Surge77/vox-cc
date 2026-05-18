@@ -9,10 +9,10 @@ from audio.vad import should_transcribe, is_hallucination, suppress_noise, apply
 
 logger = logging.getLogger(__name__)
 
-CHUNK_MS = 1000
-OVERLAP_MS = 200
-CHUNK_SAMPLES = CHUNK_MS * SAMPLE_RATE // 1000      # 16000
-OVERLAP_SAMPLES = OVERLAP_MS * SAMPLE_RATE // 1000  # 3200
+CHUNK_MS = 500
+OVERLAP_MS = 150
+CHUNK_SAMPLES = CHUNK_MS * SAMPLE_RATE // 1000      # 8000
+OVERLAP_SAMPLES = OVERLAP_MS * SAMPLE_RATE // 1000  # 2400
 MAX_SAMPLES = SAMPLE_RATE * 60                       # 960000 — 60s cap
 
 MAX_PROMPT_CHARS = 800
@@ -106,10 +106,11 @@ class DictationSession:
         if turbo is None:
             return False
 
-        # Build Turbo feed: overlap + current chunk, then AGC + noise suppress
+        # Build Turbo feed: overlap + current chunk, then AGC only.
+        # noisereduce is intentionally disabled on the streaming path — stationary=False
+        # spectral subtraction distorts quiet consonants and degrades Turbo WER.
         raw_feed = np.concatenate([overlap, chunk]) if len(overlap) else chunk.copy()
         feed = apply_agc(raw_feed)
-        feed = suppress_noise(feed, SAMPLE_RATE)
 
         vocab_prompt = self._get_vocab_prompt()
         try:

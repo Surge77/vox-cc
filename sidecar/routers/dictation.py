@@ -77,8 +77,13 @@ async def dictation_ws(ws: WebSocket):
                     await asyncio.to_thread(reload_turbo_if_needed, state._turbo_model_ref)
 
                 state._session_active = True
+                device_index = msg.get("device_index")
+                if isinstance(device_index, int):
+                    pass  # valid
+                else:
+                    device_index = None
                 session = DictationSession(state._turbo_model_ref, state._load_plan)
-                session.open_mic()
+                session.open_mic(device_index=device_index)
                 capture_task = asyncio.ensure_future(_capture_loop(session, ws, state))
 
             elif command == "terminate_stream":
@@ -146,7 +151,9 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
         while session.is_active():
             chunk = await asyncio.to_thread(session._capture.read_chunk)
             if not session.is_active():
-                # stop_capture() was called while we were reading — discard chunk, exit
+                # stop_capture() called while reading — keep chunk so final pass gets complete audio
+                accumulator.append(chunk)
+                accumulated += len(chunk)
                 break
 
             # Send audio level for reactive waveform visualization.
