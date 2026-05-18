@@ -17,8 +17,10 @@ export interface StreamingOverlayProps {
   status: AppStatus;
   partial: string;
   degraded: string[];
+  errorMessage: string;
   levelRef: React.MutableRefObject<number>;
   lastLevelTimeRef: React.MutableRefObject<number>;
+  onCancel: () => void;
 }
 
 // ── Waveform constants ────────────────────────────────────────────────────────
@@ -265,12 +267,16 @@ function OverlayCard({
   status,
   partial,
   degraded,
+  errorMessage,
   barsRef,
+  onCancel,
 }: {
   status: AppStatus;
   partial: string;
   degraded: string[];
+  errorMessage: string;
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
+  onCancel: () => void;
 }) {
   if (status === "idle" || status === "waiting_for_models") return null;
 
@@ -296,7 +302,7 @@ function OverlayCard({
   if (status === "error") {
     return (
       <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
-        <span style={{ color: "#b91c1c" }}>Error</span>
+        <span style={{ color: "#b91c1c" }}>{errorMessage || "Error"}</span>
       </div>
     );
   }
@@ -311,7 +317,12 @@ function OverlayCard({
 
     return (
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
-        <div className="vox-icon-x" />
+        <button
+          className="vox-icon-x"
+          onClick={onCancel}
+          aria-label="Cancel recording"
+          style={{ cursor: "pointer" }}
+        />
         {isListening ? (
           <WaveformBars barsRef={barsRef} />
         ) : (
@@ -369,8 +380,10 @@ export default function StreamingOverlay({
   status,
   partial,
   degraded,
+  errorMessage,
   levelRef,
   lastLevelTimeRef,
+  onCancel,
 }: StreamingOverlayProps) {
   const barsRef = React.useRef<Array<HTMLDivElement | null>>(
     new Array(NUM_BARS).fill(null),
@@ -395,7 +408,9 @@ export default function StreamingOverlay({
           status={status}
           partial={partial}
           degraded={degraded}
+          errorMessage={errorMessage}
           barsRef={barsRef}
+          onCancel={onCancel}
         />
       </div>
     </>

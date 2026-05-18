@@ -421,14 +421,26 @@ export default function App() {
         console.warn("[vox] process-text fetch failed, injecting raw:", e);
       }
 
+      let elevationError = false;
       try {
         await invoke("inject_text", { text: textToInject });
         console.log("[vox] inject_text: done");
       } catch (e) {
-        console.error("[vox] inject_text failed:", e);
+        const msg = String(e);
+        if (msg.includes("elevation_mismatch")) {
+          elevationError = true;
+          dispatch({
+            type: "ERROR",
+            message: "Elevated app — run Vox as Administrator",
+          });
+        } else {
+          console.error("[vox] inject_text failed:", e);
+        }
       } finally {
         contextRef.current = null;
-        dispatch({ type: "INJECTION_DONE" });
+        if (!elevationError) {
+          dispatch({ type: "INJECTION_DONE" });
+        }
       }
     },
     [dispatch],
@@ -660,8 +672,13 @@ export default function App() {
       status={state.status}
       partial={state.status === "streaming" ? state.partial : ""}
       degraded={state.status === "degraded" ? state.missing : []}
+      errorMessage={state.status === "error" ? state.message : ""}
       levelRef={levelRef}
       lastLevelTimeRef={lastLevelTimeRef}
+      onCancel={() => {
+        cancelStream();
+        dispatch({ type: "CANCEL_RECORDING" });
+      }}
     />
   );
 }
