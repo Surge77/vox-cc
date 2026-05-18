@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "pack-sidecar": "powershell -Command \"Compress-Archive -Path sidecar/dist/sidecar/_internal -DestinationPath sidecar/dist/vox-sidecar-internal.zip -Force\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

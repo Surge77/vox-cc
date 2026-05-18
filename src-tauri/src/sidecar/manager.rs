@@ -38,6 +38,24 @@ pub fn spawn_sidecar(
     }
     #[cfg(not(debug_assertions))]
     {
+        // Guard: sidecar.exe is a PyInstaller --onedir binary. Without _internal/ next to it,
+        // the Python runtime DLL load fails immediately. Emit a specific missing sentinel so the
+        // frontend can show a helpful message instead of a silent hang.
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let internal_dir = resource_dir.join("_internal");
+            if !internal_dir.exists() {
+                app.emit(
+                    super::events::SIDECAR_DEGRADED,
+                    serde_json::json!({ "missing": ["internal_runtime"] }),
+                )
+                .ok();
+                return Err(
+                    "sidecar _internal/ folder missing — download vox-sidecar-internal.zip \
+                     and unzip it next to Vox.exe"
+                        .to_string(),
+                );
+            }
+        }
         app.shell()
             .sidecar("sidecar")
             .map_err(|e| e.to_string())?
