@@ -3,7 +3,6 @@ mod sidecar;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 
@@ -17,6 +16,7 @@ pub fn run() {
         .manage(SidecarChild(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::context::get_focused_context,
+            commands::hotkey::set_hotkey,
             commands::inject::inject_text,
             commands::windows::position_overlay,
             commands::windows::hide_main_window,
@@ -92,43 +92,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Register global hotkey Ctrl+Shift+Space
+    // Register global hotkey (persisted in ~/.vox/data/hotkey.txt, default Ctrl+Shift+Space)
     {
-        let handle2 = app.handle().clone();
-        app.global_shortcut().on_shortcut(
-            "CommandOrControl+Shift+Space",
-            move |_, _, event| match event.state() {
-                ShortcutState::Pressed => {
-                    println!("[vox] hotkey: PRESSED");
-                    // Position + show the window immediately on Rust side — before the
-                    // event crosses the IPC bridge. React may still be loading or in a
-                    // non-idle state; Rust guarantees the window is on-screen so the
-                    // capsule is visible the moment React enters recording.
-                    if let Some(w) = handle2.get_webview_window("main") {
-                        let ms = handle2
-                            .primary_monitor()
-                            .ok()
-                            .flatten()
-                            .map(|m| *m.size())
-                            .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
-                        let ws = w.outer_size()
-                            .unwrap_or(tauri::PhysicalSize::new(420, 80));
-                        let x = (ms.width as i32 - ws.width as i32) / 2;
-                        let y = ms.height as i32 - ws.height as i32 - 80;
-                        println!("[vox] hotkey: move to ({x},{y}) monitor={ms:?} window={ws:?}");
-                        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-                        let _ = w.show();
-                    }
-                    handle2.emit("hotkey-pressed", ()).ok();
-                }
-                ShortcutState::Released => {
-                    println!("[vox] hotkey: RELEASED");
-                    // Only emit — React parks the window to -10000 when state reaches idle
-                    // (after injection completes), so the Processing/Done UI remains visible.
-                    handle2.emit("hotkey-released", ()).ok();
-                }
-            },
-        )?;
+        let saved = commands::hotkey::read_saved_hotkey();
+        commands::hotkey::register_hotkey(app.handle(), &saved)?;
     }
 
     // System tray
@@ -148,7 +115,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .tooltip("Vox — Press Ctrl+Shift+Space to dictate")
+        .tooltip("Vox — Hold your hotkey to dictate")
         .on_menu_event(move |_, event| match event.id.as_ref() {
             "open_settings" => {
                 if let Err(e) = commands::windows::open_settings_window_inner(&app_handle) {

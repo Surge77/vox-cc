@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 // ── Port discovery ────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ interface VoxSettings {
   passiveCollectionEnabled: boolean;
   defaultStyle: string;
   retentionDays: 0 | 7 | 30 | null;
+  hotkey: string;
 }
 
 const DEFAULT_SETTINGS: VoxSettings = {
@@ -46,6 +48,7 @@ const DEFAULT_SETTINGS: VoxSettings = {
   passiveCollectionEnabled: false,
   defaultStyle: "auto",
   retentionDays: null,
+  hotkey: "CommandOrControl+Shift+Space",
 };
 
 const SETTINGS_KEY = "vox_settings";
@@ -222,6 +225,8 @@ export default function Settings() {
   const [snippets, setSnippets] = useState<Record<string, string>>({});
   const [snippetTrigger, setSnippetTrigger] = useState("");
   const [snippetExpansion, setSnippetExpansion] = useState("");
+  const [capturingHotkey, setCapturingHotkey] = useState(false);
+  const [hotkeyError, setHotkeyError] = useState("");
 
   useEffect(() => {
     discoverSidecarPort().then(() => {
@@ -238,6 +243,79 @@ export default function Settings() {
         .catch(() => {});
     });
   }, []);
+
+  useEffect(() => {
+    if (!capturingHotkey) return;
+    const modifiers = new Set<string>();
+
+    function onKeyDown(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      const MODIFIER_KEYS = new Set(["Control", "Alt", "Shift", "Meta"]);
+      if (e.key === "Escape") {
+        setCapturingHotkey(false);
+        return;
+      }
+      if (MODIFIER_KEYS.has(e.key)) {
+        modifiers.add(e.key);
+        return;
+      }
+      if (modifiers.size === 0) {
+        setHotkeyError("Include at least one modifier (Ctrl, Alt, or Shift).");
+        return;
+      }
+      const parts: string[] = [];
+      if (modifiers.has("Control")) parts.push("CommandOrControl");
+      if (modifiers.has("Alt")) parts.push("Alt");
+      if (modifiers.has("Shift")) parts.push("Shift");
+      if (modifiers.has("Meta")) parts.push("Super");
+      let key = e.key;
+      if (key === " ") key = "Space";
+      else if (key.length === 1) key = key.toUpperCase();
+      const ARROW_MAP: Record<string, string> = {
+        ArrowLeft: "Left",
+        ArrowRight: "Right",
+        ArrowUp: "Up",
+        ArrowDown: "Down",
+      };
+      if (ARROW_MAP[key]) key = ARROW_MAP[key];
+      parts.push(key);
+      const newHotkey = parts.join("+");
+      invoke<void>("set_hotkey", { hotkey: newHotkey })
+        .then(() => {
+          setSettings((prev) => {
+            const next = { ...prev, hotkey: newHotkey };
+            saveSettings(next);
+            return next;
+          });
+          setCapturingHotkey(false);
+          setHotkeyError("");
+        })
+        .catch((err: unknown) => {
+          setHotkeyError(String(err));
+          setCapturingHotkey(false);
+        });
+    }
+
+    function onKeyUp(e: KeyboardEvent) {
+      modifiers.delete(e.key);
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [capturingHotkey]);
+
+  function displayHotkey(hotkey: string): string[] {
+    return hotkey.split("+").map((k) => {
+      if (k === "CommandOrControl") return "Ctrl";
+      if (k === "Super") return "Win";
+      return k;
+    });
+  }
 
   function update(patch: Partial<VoxSettings>) {
     const next = { ...settings, ...patch };
@@ -475,29 +553,71 @@ export default function Settings() {
         {/* Hotkey Section */}
         <div style={SECTION}>
           <div style={SECTION_LABEL}>Global Hotkey</div>
-          <div
-            style={{
-              display: "inline-flex",
-              gap: 4,
-              alignItems: "center",
-            }}
-          >
-            {["Ctrl", "Shift", "Space"].map((k) => (
-              <kbd
-                key={k}
+          {capturingHotkey ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div
                 style={{
-                  padding: "3px 8px",
-                  border: "1px solid #ccc",
-                  borderRadius: 4,
-                  background: "#f5f5f5",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "6px 12px",
+                  border: "2px solid #3b82f6",
+                  borderRadius: 6,
+                  background: "#eff6ff",
+                  color: "#1d4ed8",
                   fontSize: 13,
-                  fontFamily: "inherit",
                 }}
               >
-                {k}
-              </kbd>
-            ))}
-          </div>
+                Press your shortcut… (Esc to cancel)
+              </div>
+              <button
+                style={{
+                  ...BTN,
+                  background: "#f5f5f5",
+                  color: "#444",
+                  border: "1px solid #ccc",
+                }}
+                onClick={() => setCapturingHotkey(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div
+                style={{ display: "inline-flex", gap: 4, alignItems: "center" }}
+              >
+                {displayHotkey(settings.hotkey).map((k) => (
+                  <kbd
+                    key={k}
+                    style={{
+                      padding: "3px 8px",
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      background: "#f5f5f5",
+                      fontSize: 13,
+                      fontFamily: "inherit",
+                    }}
+                  >
+                    {k}
+                  </kbd>
+                ))}
+              </div>
+              <button
+                style={BTN}
+                onClick={() => {
+                  setCapturingHotkey(true);
+                  setHotkeyError("");
+                }}
+              >
+                Change
+              </button>
+            </div>
+          )}
+          {hotkeyError && (
+            <p style={{ color: "#dc2626", fontSize: 12, marginTop: 4 }}>
+              {hotkeyError}
+            </p>
+          )}
           <p style={HINT}>Hold to record, release to transcribe and inject.</p>
         </div>
 
