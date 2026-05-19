@@ -118,13 +118,10 @@ async def dictation_ws(ws: WebSocket):
                         "final_pass_ms": final_pass_ms,
                     }
                     result = final_text or fallback
-                    if result:
-                        await ws.send_json({
-                            "type": "handoff_ready",
-                            "canary_transcript": result,
-                        })
-                    else:
-                        await ws.send_json({"type": "error", "message": "No speech detected"})
+                    await ws.send_json({
+                        "type": "handoff_ready",
+                        "canary_transcript": result,
+                    })
                     session.reset()
                     session = None
                 await ws.send_json({"type": "stream_stopped"})
@@ -164,7 +161,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
     import numpy as np
     accumulator: list = []
     accumulated = 0
-    PRE_ROLL_SAMPLES = 4800  # 300 ms at 16 kHz — delay first Whisper call so first word isn't clipped
+    PRE_ROLL_SAMPLES = 1600  # 100 ms at 16 kHz — brief guard against first-word clip
     pre_roll_done = False
     pre_roll_accumulated = 0
 
@@ -217,10 +214,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
                 result = final_text or fallback
                 try:
                     await ws.send_json({"type": "stream_stopped"})
-                    if result:
-                        await ws.send_json({"type": "handoff_ready", "canary_transcript": result})
-                    else:
-                        await ws.send_json({"type": "error", "message": "No speech detected"})
+                    await ws.send_json({"type": "handoff_ready", "canary_transcript": result})
                 except Exception:
                     pass
                 session.reset()

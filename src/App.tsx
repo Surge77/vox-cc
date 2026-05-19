@@ -263,7 +263,7 @@ function useWebSocket(
           onHandoff(msg.canary_transcript);
         } else {
           console.log("[vox] ws: handoff_ready empty — resetting to idle");
-          dispatch({ type: "CANCEL_RECORDING" });
+          dispatch({ type: "RESET" });
         }
       } else if (msg.type === "error") {
         console.log("[vox] ws: sidecar error:", msg.message);
@@ -535,26 +535,13 @@ export default function App() {
                     }
                   ).partial.trim()
                 : "";
-            // Cancel only when ALL THREE conditions hold:
-            //   1. No audio_level event exceeded 0.064 scaled level (≈ 0.008 raw RMS)
-            //   2. No non-empty partial text from Turbo
-            //   3. Held long enough (>1200ms) for at least one Turbo chunk to have returned
-            // If ANY condition is false we terminate normally and let the sidecar decide.
-            const isSilent =
-              !speechDetectedRef.current && !partial && elapsed > 1200;
-            if (isSilent) {
-              console.log(
-                `[vox] hotkey-released: silence — no audio, no partial, elapsed=${elapsed}ms, cancelling`,
-              );
-              cancelStream();
-              dispatch({ type: "CANCEL_RECORDING" });
-            } else {
-              console.log(
-                `[vox] hotkey-released: speech present — audio=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}", elapsed=${elapsed}ms, terminating`,
-              );
-              terminateStream();
-              dispatch({ type: "STOP_RECORDING" });
-            }
+            // Always terminate — sidecar's VAD + hallucination gate filter silence.
+            // Empty result returns handoff_ready with empty string → frontend resets to idle.
+            console.log(
+              `[vox] hotkey-released: terminating — elapsed=${elapsed}ms, speechDetected=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}"`,
+            );
+            terminateStream();
+            dispatch({ type: "STOP_RECORDING" });
           } else if (s === "waiting_for_models" || s === "degraded") {
             // Hotkey pressed while models still loading — park window immediately
             getCurrentWindow()
@@ -664,6 +651,17 @@ export default function App() {
   useEffect(() => {
     if (state.status === "finalizing") {
       const id = setTimeout(() => dispatch({ type: "RESET" }), 35_000);
+      return () => clearTimeout(id);
+    }
+  }, [state.status]);
+
+  // Capturing timeout: if sidecar never opens mic (no audio_level for 10s), bail out
+  useEffect(() => {
+    if (state.status === "capturing") {
+      const id = setTimeout(
+        () => dispatch({ type: "ERROR", message: "Mic not responding" }),
+        10_000,
+      );
       return () => clearTimeout(id);
     }
   }, [state.status]);
