@@ -1,9 +1,13 @@
 import json
 import os
+import tempfile
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter()
+
+MAX_CORRECTION_CHARS = 50_000
 
 
 class CorrectionRequest(BaseModel):
@@ -13,6 +17,9 @@ class CorrectionRequest(BaseModel):
 @router.post("/replay/log-correction")
 async def log_correction(req: CorrectionRequest) -> dict:
     """Update the user_edited field of the last passive_log entry."""
+    if len(req.user_corrected_text) > MAX_CORRECTION_CHARS:
+        raise HTTPException(status_code=400, detail="correction text too long")
+
     import main as state
     log_path = os.path.join(state.DATA_DIR, "passive_log.jsonl")
     try:
@@ -31,10 +38,18 @@ async def log_correction(req: CorrectionRequest) -> dict:
 
     last["user_edited"] = req.user_corrected_text
     last["corrected"] = True
+    last["corrected_at"] = datetime.now(timezone.utc).isoformat()
     lines[-1] = json.dumps(last) + "\n"
 
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    # Atomic write: write to sibling temp file then rename — prevents partial reads
+    dir_path = os.path.dirname(log_path)
+    os.makedirs(dir_path, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=dir_path, delete=False, suffix=".tmp"
+    ) as tmp:
+        tmp.writelines(lines)
+        tmp_path = tmp.name
+    os.replace(tmp_path, log_path)
 
     return {"ok": True}
 

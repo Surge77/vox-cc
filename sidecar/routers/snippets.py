@@ -5,6 +5,9 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
+MAX_EXPANSION_CHARS = 5_000
+MAX_SNIPPET_COUNT = 500
+
 
 def _snippets_path(data_dir: str) -> str:
     return os.path.join(data_dir, "snippets.json")
@@ -38,10 +41,21 @@ async def list_snippets() -> dict:
 @router.post("/snippets")
 async def add_snippet(req: SnippetRequest) -> dict:
     import main as state
-    if not req.trigger.strip():
+    trigger = req.trigger.strip()
+    if not trigger:
         raise HTTPException(status_code=400, detail="trigger cannot be empty")
+    if len(req.expansion) > MAX_EXPANSION_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"expansion exceeds {MAX_EXPANSION_CHARS} character limit",
+        )
     snippets = _load_snippets(state.DATA_DIR)
-    snippets[req.trigger.strip()] = req.expansion
+    if len(snippets) >= MAX_SNIPPET_COUNT and trigger not in snippets:
+        raise HTTPException(
+            status_code=400,
+            detail=f"snippet limit ({MAX_SNIPPET_COUNT}) reached — delete one first",
+        )
+    snippets[trigger] = req.expansion
     _save_snippets(state.DATA_DIR, snippets)
     return {"ok": True}
 
