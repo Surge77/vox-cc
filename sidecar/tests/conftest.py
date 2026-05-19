@@ -20,9 +20,9 @@ _HEAVY_DEPS = [
     "scipy.signal",
     "uvicorn",
     "huggingface_hub",
-    "audio",
+    # Stub only the hardware-dependent leaf — NOT the "audio" package itself.
+    # audio.vad and audio.pipeline are real modules; they see the stubs above.
     "audio.capture",
-    "audio.vad",
     "models",
     "models.dual_loader",
     "models.prompt_router",

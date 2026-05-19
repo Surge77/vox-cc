@@ -110,8 +110,9 @@ def should_transcribe(audio_chunk: np.ndarray) -> bool:
 
 
 def is_hallucination(transcript: str, audio_duration_s: float) -> bool:
-    stripped = transcript.strip().lower().rstrip(".")
-    if stripped in HALLUCINATION_PHRASES:
+    normalized = transcript.strip().lower()
+    stripped = normalized.rstrip(".")
+    if normalized in HALLUCINATION_PHRASES or stripped in HALLUCINATION_PHRASES:
         return True
     if audio_duration_s > 3.0:
         word_count = len(transcript.split())

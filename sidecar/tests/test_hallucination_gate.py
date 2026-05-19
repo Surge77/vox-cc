@@ -22,11 +22,8 @@ from audio.vad import (
     apply_agc,
     is_hallucination,
     should_transcribe,
-    _dedup_overlap,
 )
-
-# pull in the pipeline helper too
-from audio.pipeline import _dedup_overlap  # noqa: F811
+from audio.pipeline import _dedup_overlap
 
 
 # ── is_hallucination ──────────────────────────────────────────────────────────
