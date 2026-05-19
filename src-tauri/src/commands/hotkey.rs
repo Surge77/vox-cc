@@ -1,5 +1,6 @@
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 fn hotkey_file() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".vox").join("data").join("hotkey.txt"))
@@ -18,6 +19,15 @@ pub fn register_hotkey(app: &tauri::AppHandle, hotkey: &str) -> Result<(), Strin
     app.global_shortcut()
         .on_shortcut(hotkey, move |_, _, event| match event.state() {
             ShortcutState::Pressed => {
+                // Capture the focused window BEFORE the overlay is shown.
+                // GetForegroundWindow() is volatile — any show/position call can
+                // change the foreground. Reading it here guarantees we get the
+                // user's actual target, not the Vox overlay or the Vox main process.
+                let raw_hwnd = unsafe { GetForegroundWindow().0 };
+                if let Ok(mut guard) = handle.state::<crate::TargetHwnd>().0.lock() {
+                    *guard = if raw_hwnd != 0 { Some(raw_hwnd) } else { None };
+                }
+
                 if let Some(w) = handle.get_webview_window("main") {
                     let ms = handle
                         .primary_monitor()
@@ -31,7 +41,16 @@ pub fn register_hotkey(app: &tauri::AppHandle, hotkey: &str) -> Result<(), Strin
                     let x = (ms.width as i32 - ws.width as i32) / 2;
                     let y = ms.height as i32 - ws.height as i32 - 80;
                     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-                    let _ = w.show();
+                    // SW_SHOWNOACTIVATE (= 4): show without stealing keyboard focus.
+                    // WS_EX_NOACTIVATE only blocks click-driven activation; programmatic
+                    // ShowWindow(SW_SHOW) bypasses it. Raw FFI avoids the windows 0.52 vs
+                    // 0.61 HWND type mismatch between our crate and Tauri's dep tree.
+                    if let Ok(overlay_hwnd) = w.hwnd() {
+                        extern "system" {
+                            fn ShowWindow(hwnd: *mut core::ffi::c_void, n_cmd_show: i32) -> i32;
+                        }
+                        unsafe { ShowWindow(overlay_hwnd.0, 4); }
+                    }
                 }
                 handle.emit("hotkey-pressed", ()).ok();
             }

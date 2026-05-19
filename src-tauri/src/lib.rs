@@ -8,12 +8,18 @@ use tauri::tray::TrayIconBuilder;
 
 pub struct SidecarChild(pub Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 
+/// Stores the HWND of the user's target window, captured at the instant the hotkey is
+/// pressed — before the overlay is shown. Both `inject_text` and `get_focused_context`
+/// read this instead of re-querying `GetForegroundWindow()` at their own call time.
+pub struct TargetHwnd(pub Mutex<Option<isize>>);
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .manage(SidecarChild(Mutex::new(None)))
+        .manage(TargetHwnd(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::context::get_focused_context,
             commands::hotkey::set_hotkey,

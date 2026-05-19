@@ -9,7 +9,7 @@ use windows::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
 };
 
 // Matches context.rs ComGuard — arboard touches OLE clipboard APIs which require COM.
@@ -121,10 +121,22 @@ fn is_self_elevated() -> bool {
     }
 }
 
-fn inject_sync(text: &str) -> Result<(), String> {
+fn inject_sync(text: &str, target_hwnd_raw: Option<isize>) -> Result<(), String> {
     let _com = ComGuard::init();
 
-    let hwnd: HWND = unsafe { GetForegroundWindow() };
+    let hwnd: HWND = match target_hwnd_raw {
+        Some(raw) if raw != 0 => HWND(raw),
+        _ => {
+            eprintln!("[inject] warn: no stored HWND, falling back to GetForegroundWindow");
+            unsafe { GetForegroundWindow() }
+        }
+    };
+
+    let exe_name = get_exe_name_for_hwnd(hwnd);
+    eprintln!(
+        "[inject] target_hwnd={} target_exe={} text_len={}",
+        hwnd.0, exe_name, text.len()
+    );
 
     // UAC guard: standard-user Vox cannot inject into elevated processes
     let mut target_pid = 0u32;
@@ -147,6 +159,11 @@ fn inject_sync(text: &str) -> Result<(), String> {
             Err(e) => return Err(e.to_string()),
         }
     };
+
+    // Restore foreground to target window in case the overlay captured it at show time.
+    // Safe to call even when target already has focus — SetForegroundWindow is idempotent.
+    unsafe { let _ = SetForegroundWindow(hwnd); }
+    std::thread::sleep(std::time::Duration::from_millis(30));
 
     let saved = clipboard.get_text().unwrap_or_default();
     clipboard.set_text(text).map_err(|e| e.to_string())?;
@@ -181,9 +198,14 @@ fn inject_sync(text: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn inject_text(text: String) -> Result<(), String> {
+pub async fn inject_text(
+    text: String,
+    hwnd_state: tauri::State<'_, crate::TargetHwnd>,
+) -> Result<(), String> {
+    // Take (clear) the stored HWND — each press/release cycle stores exactly one target.
+    let raw = hwnd_state.0.lock().map_err(|e| e.to_string())?.take();
     // spawn_blocking required — arboard touches COM, cannot run on async executor
-    tokio::task::spawn_blocking(move || inject_sync(&text))
+    tokio::task::spawn_blocking(move || inject_sync(&text, raw))
         .await
         .map_err(|e| e.to_string())?
 }

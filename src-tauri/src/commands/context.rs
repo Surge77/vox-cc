@@ -156,9 +156,12 @@ fn extract_cursor_context() -> (String, String) {
     .unwrap_or_default()
 }
 
-fn get_focused_context_sync() -> DeepContextPayload {
+fn get_focused_context_sync(target_hwnd_raw: Option<isize>) -> DeepContextPayload {
     let _com = ComGuard::init();
-    let hwnd: HWND = unsafe { GetForegroundWindow() };
+    let hwnd: HWND = match target_hwnd_raw {
+        Some(raw) if raw != 0 => HWND(raw),
+        _ => unsafe { GetForegroundWindow() },
+    };
     if hwnd.0 == 0 {
         return DeepContextPayload::default();
     }
@@ -186,9 +189,13 @@ fn get_focused_context_sync() -> DeepContextPayload {
 }
 
 #[tauri::command]
-pub async fn get_focused_context() -> Result<DeepContextPayload, String> {
+pub async fn get_focused_context(
+    hwnd_state: tauri::State<'_, crate::TargetHwnd>,
+) -> Result<DeepContextPayload, String> {
+    // Read but do NOT clear — inject_text needs the same HWND after this returns.
+    let raw = *hwnd_state.0.lock().map_err(|e| e.to_string())?;
     // Never returns Err — all failures degrade to default payload
-    tokio::task::spawn_blocking(|| Ok::<_, String>(get_focused_context_sync()))
+    tokio::task::spawn_blocking(move || Ok::<_, String>(get_focused_context_sync(raw)))
         .await
         .unwrap_or_else(|_| Ok(DeepContextPayload::default()))
 }
