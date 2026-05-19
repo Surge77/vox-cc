@@ -27,6 +27,8 @@ sidecar/data/
 
 # PyInstaller output
 sidecar/dist/
+sidecar/dist_final/
+sidecar/dist_new/
 sidecar/build/
 
 # Node
@@ -67,3 +69,4 @@ waveform-loader-capsules.html
 # Generated/local diagnostics
 src-tauri/gen/
 sidecar/test_mic.py
+sidecar/convert_turbo.py
