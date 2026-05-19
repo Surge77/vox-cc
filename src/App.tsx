@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
@@ -39,11 +39,13 @@ interface WsMessage {
     | "error"
     | "audio_level"
     | "stream_started"
-    | "stream_stopped";
+    | "stream_stopped"
+    | "processing_status";
   content?: string;
   canary_transcript?: string;
   message?: string;
   level?: number;
+  stage?: string;
 }
 
 interface DeepContextPayload {
@@ -178,6 +180,7 @@ function reducer(state: AppState, action: AppAction): AppState {
 function useWebSocket(
   dispatch: React.Dispatch<AppAction>,
   onHandoff: (transcript: string) => void,
+  onProcessingStatus: (msg: string) => void,
   levelRef: React.MutableRefObject<number>,
   lastLevelTimeRef: React.MutableRefObject<number>,
   speechDetectedRef: React.MutableRefObject<boolean>,
@@ -238,6 +241,11 @@ function useWebSocket(
         return;
       }
 
+      if (msg.type === "processing_status") {
+        onProcessingStatus(msg.message ?? "");
+        return;
+      }
+
       console.log("[vox] ws: message received", msg.type, msg);
 
       if (msg.type === "partial_update" && msg.content) {
@@ -277,7 +285,14 @@ function useWebSocket(
       retryDelayRef.current = delay * 2;
       retryTimerRef.current = setTimeout(connect, delay);
     };
-  }, [dispatch, onHandoff, levelRef, lastLevelTimeRef, speechDetectedRef]);
+  }, [
+    dispatch,
+    onHandoff,
+    onProcessingStatus,
+    levelRef,
+    lastLevelTimeRef,
+    speechDetectedRef,
+  ]);
 
   useEffect(() => {
     activeRef.current = true;
@@ -446,10 +461,16 @@ export default function App() {
     [dispatch],
   );
 
+  const [processingMsg, setProcessingMsg] = useState("");
+  const onProcessingStatus = useCallback((msg: string) => {
+    setProcessingMsg(msg);
+  }, []);
+
   const { beginStream, terminateStream, cancelStream, forceReconnect } =
     useWebSocket(
       dispatch,
       handleHandoff,
+      onProcessingStatus,
       levelRef,
       lastLevelTimeRef,
       speechDetectedRef,
@@ -673,6 +694,7 @@ export default function App() {
       partial={state.status === "streaming" ? state.partial : ""}
       degraded={state.status === "degraded" ? state.missing : []}
       errorMessage={state.status === "error" ? state.message : ""}
+      processingMsg={state.status === "finalizing" ? processingMsg : ""}
       levelRef={levelRef}
       lastLevelTimeRef={lastLevelTimeRef}
       onCancel={() => {

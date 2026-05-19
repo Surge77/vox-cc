@@ -31,7 +31,7 @@ def _maybe_save_audio(session: DictationSession, state) -> None:
     state._pending_audio_uuid = uid
 
 
-async def _run_final_pass(session: DictationSession, state, fallback: str) -> str:
+async def _run_final_pass(session: DictationSession, state, fallback: str, ws) -> str:
     plan = state._load_plan.get("final_pass", "skip")
 
     if plan == "distil_sequential":
@@ -39,6 +39,14 @@ async def _run_final_pass(session: DictationSession, state, fallback: str) -> st
         audio = session.get_full_audio()
         if len(audio) == 0:
             return fallback
+        try:
+            await ws.send_json({
+                "type": "processing_status",
+                "stage": "final_pass",
+                "message": "Enhancing accuracy (~5s)…",
+            })
+        except Exception:
+            pass
         try:
             loop = asyncio.get_event_loop()
             result = await asyncio.wait_for(
@@ -103,7 +111,7 @@ async def dictation_ws(ws: WebSocket):
                     _maybe_save_audio(session, state)
                     fallback = session.build_turbo_fallback()
                     t0 = time.monotonic()
-                    final_text = await _run_final_pass(session, state, fallback)
+                    final_text = await _run_final_pass(session, state, fallback, ws)
                     final_pass_ms = int((time.monotonic() - t0) * 1000)
                     state._pending_latencies = {
                         "capture_stop_ms": int(t0 * 1000),
@@ -200,7 +208,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
                 session.close_stream()
                 fallback = session.build_turbo_fallback()
                 t0 = time.monotonic()
-                final_text = await _run_final_pass(session, state, fallback)
+                final_text = await _run_final_pass(session, state, fallback, ws)
                 final_pass_ms = int((time.monotonic() - t0) * 1000)
                 state._pending_latencies = {
                     "capture_stop_ms": int(t0 * 1000),

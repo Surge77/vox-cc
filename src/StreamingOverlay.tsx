@@ -18,6 +18,7 @@ export interface StreamingOverlayProps {
   partial: string;
   degraded: string[];
   errorMessage: string;
+  processingMsg: string;
   levelRef: React.MutableRefObject<number>;
   lastLevelTimeRef: React.MutableRefObject<number>;
   onCancel: () => void;
@@ -268,6 +269,7 @@ function OverlayCard({
   partial,
   degraded,
   errorMessage,
+  processingMsg,
   barsRef,
   onCancel,
 }: {
@@ -275,6 +277,7 @@ function OverlayCard({
   partial: string;
   degraded: string[];
   errorMessage: string;
+  processingMsg: string;
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
   onCancel: () => void;
 }) {
@@ -369,7 +372,9 @@ function OverlayCard({
             letterSpacing: "0.01em",
           }}
         >
-          {status === "finalizing" ? "Processing…" : "Injecting…"}
+          {status === "finalizing"
+            ? processingMsg || "Processing…"
+            : "Injecting…"}
         </span>
       </div>
     );
@@ -385,6 +390,7 @@ export default function StreamingOverlay({
   partial,
   degraded,
   errorMessage,
+  processingMsg,
   levelRef,
   lastLevelTimeRef,
   onCancel,
@@ -413,6 +419,7 @@ export default function StreamingOverlay({
           partial={partial}
           degraded={degraded}
           errorMessage={errorMessage}
+          processingMsg={processingMsg}
           barsRef={barsRef}
           onCancel={onCancel}
         />
