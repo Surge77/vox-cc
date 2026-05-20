@@ -34,8 +34,8 @@ const BAR_MULTIPLIERS = [
 // Each bar oscillates at its own period (ms). Reduced ~30% from original for more reactive animation.
 const BAR_SPEEDS = [89, 68, 51, 79, 58, 97, 47, 72, 106, 62, 76];
 const NUM_BARS = BAR_MULTIPLIERS.length;
-const MIN_BAR_H = 4;
-const MAX_BAR_H = 28;
+const MIN_BAR_H = 3;
+const MAX_BAR_H = 34; // was 28 — wider dynamic range for more visible motion
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
 
@@ -237,10 +237,16 @@ export function useWaveformAnimation(
         // by the legacy single-scalar level (back-compat with old sidecars).
         let target: number;
         if (hasRealBands) {
-          // Log-curve scaling already applied sidecar-side. Light gamma here
-          // expands mid-range so faint speech moves bars.
+          // Aggressive gamma (0.5) expands mid range so quiet SST audio
+          // moves bars dramatically. Add a small per-bar wobble that's
+          // independent of the spectrum so even a held vowel doesn't look
+          // frozen — bars "breathe" instead of locking at one height.
           const raw = Math.min(1, Math.max(0, bands[i]));
-          target = Math.pow(raw, 0.7);
+          const expanded = Math.pow(raw, 0.5);
+          const spd = BAR_SPEEDS[i];
+          const ph = (i / NUM_BARS) * Math.PI * 2;
+          const wobble = 0.08 * Math.sin(t / spd + ph); // ±8% organic jitter
+          target = Math.max(0, Math.min(1, expanded + wobble));
         } else if (hasRealLevel) {
           const raw = Math.min(1, levelRef.current * 12);
           const spd = BAR_SPEEDS[i];
@@ -256,12 +262,14 @@ export function useWaveformAnimation(
           target = idleLevel * (0.6 + 0.4 * Math.sin(t / 480 + ph));
         }
 
-        // Per-bar smoothing: fast attack (0.8 toward higher), slow decay (0.12).
+        // Per-bar smoothing — looser than before so bars actually swing.
+        // Attack: 0.85 (was 0.8) — snappier rise on speech onset.
+        // Decay:  0.72 (was 0.88) — bars fall faster, won't appear "stuck".
         const prev = smoothedBandsRef.current[i];
         const next =
           target > prev
-            ? prev * 0.2 + target * 0.8
-            : prev * 0.88 + target * 0.12;
+            ? prev * 0.15 + target * 0.85
+            : prev * 0.72 + target * 0.28;
         smoothedBandsRef.current[i] = next;
 
         const peak = MIN_BAR_H + BAR_MULTIPLIERS[i] * (MAX_BAR_H - MIN_BAR_H);
@@ -332,8 +340,9 @@ function OverlayCard({
     status === "recording" ||
     status === "streaming"
   ) {
-    const displayText = partial || "Listening…";
-    const isListening = !partial;
+    const hasPartial = !!partial;
+    const trailingLabel =
+      status === "capturing" ? "Starting…" : hasPartial ? "" : "Listening…";
 
     return (
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
@@ -343,36 +352,41 @@ function OverlayCard({
           aria-label="Cancel recording"
           style={{ cursor: "pointer" }}
         />
-        {isListening ? (
-          <WaveformBars barsRef={barsRef} />
-        ) : (
+        {/* Waveform always visible during capture — continuous "still recording"
+            signal. Sits left of the partial transcript so the bars keep moving
+            even as text grows. */}
+        <WaveformBars barsRef={barsRef} />
+        {hasPartial && (
           <span
             style={{
               flex: "1 1 auto",
-              minWidth: 84,
+              minWidth: 0,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              direction: "rtl", // newest words stay visible on the right
+              textAlign: "left",
             }}
+            title={partial}
           >
-            {displayText}
+            {/* bidi-LTR wrapper so rtl direction only affects clipping,
+                not character order */}
+            <bdo dir="ltr">{partial}</bdo>
           </span>
         )}
-        <span
-          style={{
-            color: "#5a6470",
-            fontSize: 12,
-            fontWeight: 500,
-            flexShrink: 0,
-            letterSpacing: "0.01em",
-          }}
-        >
-          {status === "capturing"
-            ? "Starting…"
-            : isListening
-              ? "Listening…"
-              : ""}
-        </span>
+        {trailingLabel && (
+          <span
+            style={{
+              color: "#5a6470",
+              fontSize: 12,
+              fontWeight: 500,
+              flexShrink: 0,
+              letterSpacing: "0.01em",
+            }}
+          >
+            {trailingLabel}
+          </span>
+        )}
       </div>
     );
   }
