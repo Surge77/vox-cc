@@ -21,6 +21,7 @@ export interface StreamingOverlayProps {
   processingMsg: string;
   levelRef: React.MutableRefObject<number>;
   lastLevelTimeRef: React.MutableRefObject<number>;
+  bandsRef: React.MutableRefObject<number[]>;
   onCancel: () => void;
 }
 
@@ -210,45 +211,61 @@ export function useWaveformAnimation(
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>,
   levelRef: React.MutableRefObject<number>,
   lastLevelTimeRef: React.MutableRefObject<number>,
+  bandsRef: React.MutableRefObject<number[]>,
 ) {
-  const smoothedRef = React.useRef(0);
+  // Per-bar smoothed values — each bar tracks its own band with fast attack /
+  // slow decay so the spectrum reads as a real-time analyzer not a sine wave.
+  const smoothedBandsRef = React.useRef<number[]>(new Array(NUM_BARS).fill(0));
   const rafRef = React.useRef<number>();
 
   React.useEffect(() => {
     const animate = () => {
       const t = Date.now();
       const hasRealLevel = t - lastLevelTimeRef.current < 400;
-      // Speech RMS is typically 0.01–0.1 — amplify 12× so bars use full range on normal speech.
-      const raw = hasRealLevel ? levelRef.current * 12 : 0;
-      const amplified = Math.min(1.0, raw);
+      const bands = bandsRef.current;
+      const hasRealBands =
+        hasRealLevel && Array.isArray(bands) && bands.length === NUM_BARS;
 
-      // Fast attack so bars jump on speech onset; slow decay so they ease down naturally.
-      if (amplified > smoothedRef.current) {
-        smoothedRef.current = smoothedRef.current * 0.2 + amplified * 0.8;
-      } else {
-        smoothedRef.current = smoothedRef.current * 0.88 + amplified * 0.12;
-      }
-      const s = smoothedRef.current;
-
-      // baseActivity keeps bars moving even at silence (0.18 floor = gentle idle)
-      // and scales to full range when speaking.
-      const baseActivity = 0.18 + s * 0.82;
+      // Idle floor — gentle motion when no level events / no bands.
+      const idleLevel = 0.18;
 
       barsRef.current.forEach((bar, i) => {
         if (!bar) return;
-        const spd = BAR_SPEEDS[i];
-        const ph1 = (i / NUM_BARS) * Math.PI * 2;
-        const ph2 = ph1 + 2.1; // offset second harmonic so bars look independent
 
-        // Two-frequency compound wave — breaks mechanical regularity
-        const osc =
-          Math.sin(t / spd + ph1) * 0.65 +
-          Math.sin(t / (spd * 1.6) + ph2) * 0.35;
-        // osc ∈ [–1, 1] → normalise to [0, 1]
-        const norm = (osc + 1) / 2;
+        // Real-spectrum branch: bar i ← FFT band i (with per-bar attack/decay).
+        // Fallback branch: two-frequency compound sine like before, modulated
+        // by the legacy single-scalar level (back-compat with old sidecars).
+        let target: number;
+        if (hasRealBands) {
+          // Log-curve scaling already applied sidecar-side. Light gamma here
+          // expands mid-range so faint speech moves bars.
+          const raw = Math.min(1, Math.max(0, bands[i]));
+          target = Math.pow(raw, 0.7);
+        } else if (hasRealLevel) {
+          const raw = Math.min(1, levelRef.current * 12);
+          const spd = BAR_SPEEDS[i];
+          const ph1 = (i / NUM_BARS) * Math.PI * 2;
+          const ph2 = ph1 + 2.1;
+          const osc =
+            Math.sin(t / spd + ph1) * 0.65 +
+            Math.sin(t / (spd * 1.6) + ph2) * 0.35;
+          target = (idleLevel + raw * 0.82) * ((osc + 1) / 2);
+        } else {
+          // Pure idle motion — slow sine, very low amplitude.
+          const ph = (i / NUM_BARS) * Math.PI * 2;
+          target = idleLevel * (0.6 + 0.4 * Math.sin(t / 480 + ph));
+        }
+
+        // Per-bar smoothing: fast attack (0.8 toward higher), slow decay (0.12).
+        const prev = smoothedBandsRef.current[i];
+        const next =
+          target > prev
+            ? prev * 0.2 + target * 0.8
+            : prev * 0.88 + target * 0.12;
+        smoothedBandsRef.current[i] = next;
 
         const peak = MIN_BAR_H + BAR_MULTIPLIERS[i] * (MAX_BAR_H - MIN_BAR_H);
-        const h = MIN_BAR_H + norm * baseActivity * (peak - MIN_BAR_H);
+        const h = MIN_BAR_H + next * (peak - MIN_BAR_H);
         bar.style.height = `${Math.max(MIN_BAR_H, h)}px`;
       });
 
@@ -259,7 +276,7 @@ export function useWaveformAnimation(
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [barsRef, levelRef, lastLevelTimeRef]);
+  }, [barsRef, levelRef, lastLevelTimeRef, bandsRef]);
 }
 
 // ── Overlay card ──────────────────────────────────────────────────────────────
@@ -393,13 +410,14 @@ export default function StreamingOverlay({
   processingMsg,
   levelRef,
   lastLevelTimeRef,
+  bandsRef,
   onCancel,
 }: StreamingOverlayProps) {
   const barsRef = React.useRef<Array<HTMLDivElement | null>>(
     new Array(NUM_BARS).fill(null),
   );
 
-  useWaveformAnimation(barsRef, levelRef, lastLevelTimeRef);
+  useWaveformAnimation(barsRef, levelRef, lastLevelTimeRef, bandsRef);
 
   return (
     <>

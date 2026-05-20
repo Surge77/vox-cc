@@ -38,13 +38,39 @@ def load_distil():
     )
 
 
-def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
+def _peak_normalize(audio: np.ndarray, target_peak: float = 0.6) -> np.ndarray:
+    """Peak-normalize quiet audio to target_peak. Uses PEAK not RMS — silences
+    don't pull the gain factor down (the bug that caused old AGC to hard-clip).
+    Skips work when audio is already at/above target. Caps gain at 8x so pure
+    silence doesn't get amplified into noise."""
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if peak >= target_peak or peak < 0.001:
+        return audio
+    gain = min(target_peak / peak, 8.0)
+    return (audio * gain).astype(np.float32)
+
+
+def _pre_emphasis(audio: np.ndarray, alpha: float = 0.97) -> np.ndarray:
+    """Standard pre-emphasis high-pass filter: boosts 2-8kHz range where
+    consonants live. Helps Whisper on quiet mics where fricatives are
+    barely audible. y[n] = x[n] - alpha * x[n-1]."""
+    if len(audio) < 2:
+        return audio
+    out = np.empty_like(audio)
+    out[0] = audio[0]
+    out[1:] = audio[1:] - alpha * audio[:-1]
+    return out
+
+
+def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> tuple[str, float]:
     """
     Sequential swap: null Turbo ref, load distil, transcribe full session audio, unload distil.
     turbo_model_ref[0] stays None after return — begin_stream calls reload_turbo_if_needed.
+    Returns (text, avg_logprob) — avg_logprob lets the caller flag low-confidence transcripts.
     """
     import torch
     result = ""
+    avg_logprob = 0.0
     distil = None
     try:
         turbo_model_ref[0] = None
@@ -53,10 +79,19 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
 
         distil = load_distil()
 
-        # DEBUG: AGC bypass test — peak ~0.12, AGC 13x gain causes hard clipping at 1.0.
-        # distil-large-v3 handles quiet audio natively; clipped audio = garbage transcription.
-        from audio.vad import is_hallucination
-        audio_feed = audio_np
+        from audio.vad import is_hallucination, vad_trim_audio
+        # VAD-trim removes leading/trailing/internal silence — typical 8s
+        # session shrinks to 4-5s, distil transcribes ~40% faster.
+        trimmed = vad_trim_audio(audio_np)
+        original_s = len(audio_np) / 16000
+        trimmed_s = len(trimmed) / 16000
+        if trimmed_s < original_s * 0.9:
+            logger.info("VAD-trim: %.2fs → %.2fs (%.0f%% saved)",
+                        original_s, trimmed_s, 100 * (1 - trimmed_s / max(original_s, 0.01)))
+        # Peak-normalize (gentle, replaces old broken AGC) then pre-emphasis
+        # (boost consonant range). Both help the quiet Intel SST signal without
+        # the session-RMS clipping bug the old AGC had.
+        audio_feed = _pre_emphasis(_peak_normalize(trimmed))
 
         vocab_prompt = _get_vocab_prompt()
         segments, _ = distil.transcribe(
@@ -67,13 +102,20 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
             word_timestamps=True,
             initial_prompt=vocab_prompt or None,
         )
-        parts = []
+        parts: list[str] = []
+        logprobs: list[float] = []
         for seg in segments:
             text = seg.text.strip()
             if text and not is_hallucination(text, seg.end - seg.start):
                 parts.append(text)
+                if getattr(seg, "avg_logprob", None) is not None:
+                    logprobs.append(seg.avg_logprob)
         result = " ".join(parts)
-        logger.info("distil final pass: %d chars, audio %.1fs", len(result), len(audio_np) / 16000)
+        avg_logprob = float(np.mean(logprobs)) if logprobs else 0.0
+        logger.info(
+            "distil final pass: %d chars, audio %.1fs, avg_logprob=%.3f",
+            len(result), len(audio_np) / 16000, avg_logprob,
+        )
 
     except Exception:
         logger.exception("distil final pass failed — falling back to Turbo text")
@@ -89,7 +131,7 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
         except Exception:
             pass
 
-    return result
+    return result, avg_logprob
 
 
 def reload_turbo_if_needed(turbo_model_ref: list) -> None:

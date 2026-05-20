@@ -40,12 +40,18 @@ interface WsMessage {
     | "audio_level"
     | "stream_started"
     | "stream_stopped"
-    | "processing_status";
+    | "processing_status"
+    | "low_confidence"
+    | "device_changed";
   content?: string;
   canary_transcript?: string;
   message?: string;
   level?: number;
+  bands?: number[]; // 11 FFT band amplitudes [0,1] for spectrum waveform
   stage?: string;
+  score?: number; // distil avg_logprob when low_confidence
+  threshold?: number;
+  device_index?: number | null;
 }
 
 interface DeepContextPayload {
@@ -184,6 +190,7 @@ function useWebSocket(
   levelRef: React.MutableRefObject<number>,
   lastLevelTimeRef: React.MutableRefObject<number>,
   speechDetectedRef: React.MutableRefObject<boolean>,
+  bandsRef: React.MutableRefObject<number[]>,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -221,11 +228,14 @@ function useWebSocket(
       if (msg.type === "audio_level" && typeof msg.level === "number") {
         levelRef.current = msg.level;
         lastLevelTimeRef.current = Date.now();
-        // level = rms * 8 (scaled in dictation.py). Threshold 0.064 = raw RMS 0.008 × 8 scale.
+        if (Array.isArray(msg.bands) && msg.bands.length === 11) {
+          bandsRef.current = msg.bands as number[];
+        }
+        // Speech-detected only triggers stream_started promotion DURING a session.
+        // Idle meter now streams 30 Hz at all times; reusing it for "speech started"
+        // would mis-fire on ambient noise. Sidecar still sends explicit stream_started.
         if (msg.level > 0.064) speechDetectedRef.current = true;
-        // Fallback for older sidecar builds that don't send stream_started:
-        // first audio_level proves capture is active — promote capturing → recording.
-        if (!streamStartedRef.current) {
+        if (!streamStartedRef.current && msg.level > 0.05) {
           streamStartedRef.current = true;
           dispatch({ type: "STREAM_STARTED" });
         }
@@ -376,6 +386,7 @@ export default function App() {
   // Refs for real-time audio level — passed to StreamingOverlay for RAF animation
   const levelRef = useRef(0);
   const lastLevelTimeRef = useRef(0);
+  const bandsRef = useRef<number[]>(new Array(11).fill(0)); // 11 FFT band amplitudes
   const contextRef = useRef<DeepContextPayload | null>(null);
   const speechDetectedRef = useRef(false);
   const recordingStartTimeRef = useRef(0);
@@ -494,6 +505,7 @@ export default function App() {
       levelRef,
       lastLevelTimeRef,
       speechDetectedRef,
+      bandsRef,
     );
 
   // Tauri event listeners
@@ -715,6 +727,7 @@ export default function App() {
       processingMsg={state.status === "finalizing" ? processingMsg : ""}
       levelRef={levelRef}
       lastLevelTimeRef={lastLevelTimeRef}
+      bandsRef={bandsRef}
       onCancel={() => {
         cancelStream();
         dispatch({ type: "CANCEL_RECORDING" });

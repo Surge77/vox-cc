@@ -9,10 +9,10 @@ from audio.vad import should_transcribe, is_hallucination, suppress_noise, apply
 
 logger = logging.getLogger(__name__)
 
-CHUNK_MS = 500
-OVERLAP_MS = 150
-CHUNK_SAMPLES = CHUNK_MS * SAMPLE_RATE // 1000      # 8000
-OVERLAP_SAMPLES = OVERLAP_MS * SAMPLE_RATE // 1000  # 2400
+CHUNK_MS = 1000      # spec value — 500ms halved Whisper's context window
+OVERLAP_MS = 200     # spec value — covers cross-chunk word boundaries
+CHUNK_SAMPLES = CHUNK_MS * SAMPLE_RATE // 1000      # 16000
+OVERLAP_SAMPLES = OVERLAP_MS * SAMPLE_RATE // 1000  # 3200
 MAX_SAMPLES = SAMPLE_RATE * 60                       # 960000 — 60s cap
 
 MAX_PROMPT_CHARS = 800

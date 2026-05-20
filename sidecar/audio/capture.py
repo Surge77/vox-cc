@@ -506,12 +506,46 @@ class AudioCapture:
 # pre-roll. Mic is already warm + audio from BEFORE the hotkey press is
 # included.
 
+# 11 log-spaced frequency bands covering speech range (80 Hz – 7800 Hz).
+# Pre-computed at module load; used by PersistentMicCapture._compute_spectrum.
+_SPEECH_BAND_EDGES_HZ = np.logspace(np.log10(80), np.log10(7800), 12)
+
+
+def _compute_band_amplitudes(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> list[float]:
+    """FFT a chunk, group magnitude bins into 11 log-spaced speech-frequency
+    bands, return normalized amplitudes ∈ [0, 1]. ~0.1 ms per chunk on numpy.
+    Returns 11 floats (one per band)."""
+    n = len(audio)
+    if n < 64:
+        return [0.0] * 11
+    # Window to reduce spectral leakage. Hann is overkill for visualization.
+    windowed = audio * np.hanning(n)
+    spectrum = np.abs(np.fft.rfft(windowed))
+    freqs = np.fft.rfftfreq(n, d=1.0 / sample_rate)
+    bands: list[float] = []
+    for i in range(11):
+        lo, hi = _SPEECH_BAND_EDGES_HZ[i], _SPEECH_BAND_EDGES_HZ[i + 1]
+        mask = (freqs >= lo) & (freqs < hi)
+        if not mask.any():
+            bands.append(0.0)
+            continue
+        # Mean magnitude in band, normalized by chunk length so band amplitude
+        # is comparable across chunk sizes. Then log-compress + scale.
+        mag = float(spectrum[mask].mean()) / max(1, n)
+        # Log compression: human ear / visual perception of loudness is log.
+        # Scale so typical speech band amplitude (~0.001-0.01 raw) maps to 0.3-0.8.
+        compressed = np.log10(1.0 + mag * 800.0)
+        bands.append(float(min(1.0, compressed)))
+    return bands
+
+
 class PersistentMicCapture:
     """Single always-on AudioCapture with pre-roll buffer + listener fan-out.
 
     Background daemon thread continuously reads chunks and:
       1. Appends to a bounded deque (pre-roll, default 3 seconds)
-      2. Calls each registered listener with the chunk
+      2. Computes an FFT spectrum (11 log-spaced speech bands) for UI metering
+      3. Calls each registered listener with the chunk
     Listeners are responsible for forwarding chunks to their consumer
     (typically an asyncio.Queue via loop.call_soon_threadsafe).
     """
@@ -529,6 +563,10 @@ class PersistentMicCapture:
         self._thread: Optional[threading.Thread] = None
         self._listeners: list[Callable[[np.ndarray], None]] = []
         self._started = False
+        # Latest metering snapshot (overwritten by background thread each chunk).
+        # Reader: idle meter loop in dictation.py via current_metering().
+        self._last_level: float = 0.0
+        self._last_bands: list[float] = [0.0] * 11
 
     def start(self) -> None:
         if self._started:
@@ -582,8 +620,20 @@ class PersistentMicCapture:
                     time.sleep(0.1)
                 continue
 
+            # Compute metering (cheap FFT) for UI waveform — even when no
+            # session is active. Lets the capsule show ambient motion on
+            # idle and react instantly when speech starts.
+            try:
+                bands = _compute_band_amplitudes(chunk)
+                level = float(np.sqrt(np.mean(chunk ** 2)))
+            except Exception:
+                bands = [0.0] * 11
+                level = 0.0
+
             with self._lock:
                 self._preroll.append(chunk)
+                self._last_level = level
+                self._last_bands = bands
                 listeners = list(self._listeners)
 
             # Fan out to listeners OUTSIDE the lock so a slow consumer can't
@@ -612,3 +662,29 @@ class PersistentMicCapture:
                 self._listeners.remove(cb)
             except ValueError:
                 pass
+
+    def current_metering(self) -> tuple[float, list[float]]:
+        """Return latest (level, bands) snapshot. Lock-protected because the
+        background thread writes these every chunk."""
+        with self._lock:
+            return self._last_level, list(self._last_bands)
+
+    def swap_device(self, device_index: Optional[int], exclusive_mode: bool, prefer_pyaudio: bool) -> None:
+        """Hot-swap the underlying capture device without losing the persistent
+        thread. Stops the current AudioCapture, creates a new one with the new
+        device, replaces it, opens it. Brief metering blackout during swap."""
+        with self._lock:
+            self._preroll.clear()
+            self._last_level = 0.0
+            self._last_bands = [0.0] * 11
+        try:
+            self._capture.close()
+        except Exception:
+            pass
+        self._capture = AudioCapture(
+            device_index=device_index,
+            exclusive_mode=exclusive_mode,
+            prefer_pyaudio=prefer_pyaudio,
+        )
+        self._capture.open()
+        logger.warning("[PersistentMic] device swapped to index=%s", device_index)

@@ -63,6 +63,34 @@ def _maybe_save_audio(session: DictationSession, state) -> None:
     state._pending_audio_uuid = uid
 
 
+LOW_CONFIDENCE_LOGPROB = -1.0  # distil avg_logprob threshold — below this, warn UI
+METER_HZ = 30  # idle audio_level emit rate; 30 Hz = smooth bars without flooding WS
+
+
+async def _idle_meter_loop(ws: WebSocket, state) -> None:
+    """Continuously emit audio_level events with FFT spectrum so the capsule
+    waveform reacts even between sessions. Runs for the lifetime of the WS
+    connection. Reads the latest metering snapshot from PersistentMicCapture
+    every 1/METER_HZ seconds."""
+    interval = 1.0 / METER_HZ
+    while True:
+        try:
+            mic = state._mic_ref[0]
+            if mic is not None:
+                level, bands = mic.current_metering()
+                await ws.send_json({
+                    "type": "audio_level",
+                    "level": min(1.0, level * 30.0),  # legacy single-scalar (back-compat)
+                    "bands": bands,                    # 11-band log-spaced spectrum
+                })
+            await asyncio.sleep(interval)
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            return
+        except Exception:
+            # WS likely closed mid-send; loop will exit on next iteration
+            return
+
+
 async def _run_final_pass(session: DictationSession, state, fallback: str, ws) -> str:
     plan = state._load_plan.get("final_pass", "skip")
 
@@ -71,20 +99,37 @@ async def _run_final_pass(session: DictationSession, state, fallback: str, ws) -
         audio = session.get_full_audio()
         if len(audio) == 0:
             return fallback
-        try:
-            await ws.send_json({
-                "type": "processing_status",
-                "stage": "final_pass",
-                "message": "Enhancing accuracy (~5s)…",
-            })
-        except Exception:
-            pass
+
+        async def _emit(stage: str, message: str) -> None:
+            try:
+                await ws.send_json({"type": "processing_status", "stage": stage, "message": message})
+            except Exception:
+                pass
+
+        # Multi-stage progress so the capsule isn't a generic spinner.
+        # Each stage maps to a real operation in run_distil_final_pass:
+        #   trim    → vad_trim_audio (CPU, ~100ms)
+        #   load    → Turbo unload + distil load (~800-1500ms)
+        #   decode  → distil.transcribe with beam=5 (~3000-5000ms, dominant)
+        await _emit("trim", "Trimming silence…")
+        await _emit("load", "Loading model…")
+        await _emit("decode", "Transcribing…")
         try:
             loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(
+            result, avg_logprob = await asyncio.wait_for(
                 loop.run_in_executor(None, run_distil_final_pass, audio, state._turbo_model_ref),
                 timeout=30.0,
             )
+            if result.strip() and avg_logprob < LOW_CONFIDENCE_LOGPROB:
+                try:
+                    await ws.send_json({
+                        "type": "low_confidence",
+                        "score": avg_logprob,
+                        "threshold": LOW_CONFIDENCE_LOGPROB,
+                    })
+                except Exception:
+                    pass
+            await _emit("clean", "Cleaning text…")
             return result if result.strip() else fallback
         except (asyncio.TimeoutError, Exception):
             return fallback
@@ -99,11 +144,47 @@ async def dictation_ws(ws: WebSocket):
 
     session: DictationSession | None = None
     capture_task: asyncio.Task | None = None
+    meter_task: asyncio.Task = asyncio.ensure_future(_idle_meter_loop(ws, state))
 
     try:
         while True:
             msg = await ws.receive_json()
             command = msg.get("command")
+
+            if command == "set_device":
+                # Hot-swap mic device without restarting sidecar. Settings
+                # persisted so next sidecar boot uses the same choice.
+                if state._session_active:
+                    await ws.send_json({"type": "error", "message": "Stop dictation before changing device"})
+                    continue
+                new_idx = msg.get("device_index")
+                if new_idx is not None and not isinstance(new_idx, int):
+                    new_idx = None
+                mic = state._mic_ref[0]
+                if mic is None:
+                    await ws.send_json({"type": "error", "message": "Mic not initialized"})
+                    continue
+                try:
+                    settings = {}
+                    settings_path = os.path.join(state.DATA_DIR, "settings.json")
+                    try:
+                        with open(settings_path) as f:
+                            settings = json.load(f)
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass
+                    await asyncio.to_thread(
+                        mic.swap_device,
+                        new_idx,
+                        settings.get("exclusive_mode", False),
+                        settings.get("prefer_pyaudio", False),
+                    )
+                    settings["audio_device_index"] = new_idx
+                    with open(settings_path, "w") as f:
+                        json.dump(settings, f, indent=2)
+                    await ws.send_json({"type": "device_changed", "device_index": new_idx})
+                except Exception as e:
+                    await ws.send_json({"type": "error", "message": f"Device swap failed: {e}"})
+                continue
 
             if command == "begin_stream":
                 # If a session is already active (e.g. drain timed out, or previous
@@ -216,6 +297,12 @@ async def dictation_ws(ws: WebSocket):
                     pass
             session.stop_session()
         state._session_active = False
+        if meter_task is not None:
+            meter_task.cancel()
+            try:
+                await meter_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None:
@@ -241,12 +328,10 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
             if chunk is None:
                 continue  # timeout — recheck _active
 
+            # audio_level events come from the idle meter task (30 Hz) — no
+            # per-chunk send here, avoids duplicate / out-of-order events.
             rms = float(np.sqrt(np.mean(chunk ** 2)))
             level = min(1.0, rms * 30.0)
-            try:
-                await ws.send_json({"type": "audio_level", "level": level})
-            except Exception:
-                pass
 
             accumulator.append(chunk)
             accumulated += len(chunk)
@@ -316,7 +401,7 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
         _silence_samples = 0
         _SILENCE_FLOOR = 0.0005
         _SILENCE_TARGET = int(0.70 * SAMPLE_RATE)
-        _DRAIN_MAX_S = 2.0
+        _DRAIN_MAX_S = 1.5  # was 2.0 — VAD-target still 700ms, hard cap reduced
         print("[sidecar] drain: capturing trailing speech...", flush=True)
         while (_time.monotonic() - _drain_start) < _DRAIN_MAX_S:
             _dc = await session.read_chunk(timeout=0.2)
