@@ -21,6 +21,7 @@ pub fn run() {
         .manage(SidecarChild(Mutex::new(None)))
         .manage(TargetHwnd(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
+            commands::audio::ensure_mic_volume,
             commands::context::get_focused_context,
             commands::hotkey::set_hotkey,
             commands::inject::inject_text,
@@ -97,6 +98,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             .ok();
         }
     }
+
+    // Boost default capture device to 100% if Windows mic volume is low.
+    // Near-zero RMS (rms < 0.002) in the sidecar logs means mic volume was set
+    // too low in Windows Sound Settings — this fixes it automatically at launch.
+    let mic_status = commands::audio::ensure_mic_volume();
+    eprintln!("{mic_status}");
 
     // Register global hotkey (persisted in ~/.vox/data/hotkey.txt, default Ctrl+Shift+Space)
     {

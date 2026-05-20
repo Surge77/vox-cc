@@ -382,6 +382,12 @@ export default function App() {
 
   const handleHandoff = useCallback(
     async (canaryTranscript: string) => {
+      console.log(
+        "[vox] handleHandoff: entry canary_len=",
+        canaryTranscript.length,
+        "preview=",
+        canaryTranscript.slice(0, 60),
+      );
       if (!canaryTranscript.trim()) {
         // Final pass returned nothing — sidecar processed silence, skip injection.
         console.log(
@@ -417,6 +423,10 @@ export default function App() {
 
       let textToInject = canaryTranscript;
       try {
+        console.log(
+          "[vox] handleHandoff: POST /process-text exe=",
+          body.executable_name,
+        );
         const resp = await fetch(
           `http://127.0.0.1:${sidecarPort}/process-text`,
           {
@@ -429,6 +439,12 @@ export default function App() {
         if (resp.ok) {
           const data = await resp.json();
           if (data.cleaned_text) textToInject = data.cleaned_text;
+          console.log(
+            "[vox] handleHandoff: cleaned_len=",
+            data.cleaned_text?.length ?? 0,
+            "err=",
+            data.error ?? null,
+          );
           if (data.error)
             console.warn("[vox] process-text non-fatal error:", data.error);
         }
@@ -438,6 +454,10 @@ export default function App() {
 
       let elevationError = false;
       try {
+        console.log(
+          "[vox] handleHandoff: invoking inject_text text_len=",
+          textToInject.length,
+        );
         await invoke("inject_text", { text: textToInject });
         console.log("[vox] inject_text: done");
       } catch (e) {

@@ -1,3 +1,4 @@
+import gzip
 import numpy as np
 import noisereduce as nr
 import torch
@@ -12,8 +13,9 @@ DIGITAL_SILENCE_RMS = 0.0005
 NOISE_RMS_FLOOR = 0.002
 
 # Silero VAD speech probability threshold (0.0–1.0)
-# 0.5 is the model's recommended default; lower = more sensitive
-SILERO_THRESHOLD = 0.35
+# Lowered from 0.35 to 0.25 to catch quieter speech that was previously gated out.
+# The VAD still rejects true silence (rms < DIGITAL_SILENCE_RMS) before Silero runs.
+SILERO_THRESHOLD = 0.25
 
 HALLUCINATION_PHRASES = {
     "thank you", "thanks for watching", "you", ".", "...",
@@ -78,22 +80,20 @@ def _silero_has_speech(audio_chunk: np.ndarray, sample_rate: int = 16000) -> boo
 # ---------------------------------------------------------------------------
 # AGC — Automatic Gain Control
 # ---------------------------------------------------------------------------
-def apply_agc(audio: np.ndarray, target_rms: float = 0.08) -> np.ndarray:
+def apply_agc(audio: np.ndarray, target_rms: float = 0.12) -> np.ndarray:
     """Normalize audio to a target RMS level. Prevents quiet mics from
     producing sub-threshold signals that get dropped by the VAD.
-    - target_rms=0.08 maps to roughly -22 dBFS, comfortable for Whisper
-    - Gain is capped at +26 dB (20x) to avoid amplifying pure background noise
+    - target_rms=0.12 maps to roughly -18 dBFS — louder than the old 0.08
+      so Whisper receives a stronger signal from quiet microphones
+    - Gain is capped at +32 dB (40x) to avoid amplifying pure background noise
     - Signals below digital silence floor are returned unchanged (no point amplifying zeros)
     """
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    if rms < 1e-7:
-        return audio  # true silence — don't amplify
-    gain = target_rms / rms
-    gain = min(gain, 20.0)  # cap at ~26 dB
-    result = audio * gain
-    # Soft-clip to prevent hard clipping artifacts
-    result = np.tanh(result).astype(np.float32)
-    return result
+    current_rms = float(np.sqrt(np.mean(audio ** 2)))
+    if current_rms < DIGITAL_SILENCE_RMS:
+        return audio  # truly silent — no point amplifying
+    gain = target_rms / current_rms
+    gain = min(gain, 40.0)  # cap at ~32 dB — handles very quiet mics (rms ~0.003)
+    return (audio * gain).clip(-1.0, 1.0)   # Soft-clip to prevent hard clipping artifacts
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +118,15 @@ def is_hallucination(transcript: str, audio_duration_s: float) -> bool:
         word_count = len(transcript.split())
         min_expected = audio_duration_s * 0.3
         if word_count < min_expected:
+            return True
+    # Compression ratio test — matches faster-whisper's own hallucination guard.
+    # Hallucinated text is repetitive/looping and compresses far more than real speech.
+    # Ratio = uncompressed / compressed; threshold of 2.4 is faster-whisper's default.
+    # Require >= 50 chars so gzip's ~18-byte header doesn't dominate the result.
+    if len(transcript) >= 50:
+        encoded = transcript.encode("utf-8")
+        ratio = len(encoded) / len(gzip.compress(encoded))
+        if ratio > 2.4:
             return True
     return False
 

@@ -4,7 +4,7 @@ import logging
 import os
 import numpy as np
 
-from audio.capture import AudioCapture, SAMPLE_RATE
+from audio.capture import AudioCapture, PersistentMicCapture, SAMPLE_RATE
 from audio.vad import should_transcribe, is_hallucination, suppress_noise, apply_agc
 
 logger = logging.getLogger(__name__)
@@ -50,43 +50,86 @@ def _dedup_overlap(prev_tail: list[str], new_text: str) -> str:
 
 
 class DictationSession:
-    def __init__(self, turbo_model_ref: list, load_plan: dict):
+    """One dictation session backed by a shared PersistentMicCapture.
+
+    The mic is owned by main.py and stays open for the sidecar's lifetime.
+    A session subscribes a listener that fans chunks from the background
+    mic thread into this session's asyncio.Queue (via call_soon_threadsafe).
+    On start_session() the last ~3s of pre-roll audio is copied into the
+    ring buffer so the user's first words — spoken during WASAPI warmup or
+    even slightly before the hotkey was pressed — are not lost."""
+
+    def __init__(
+        self,
+        mic: PersistentMicCapture,
+        turbo_model_ref: list,
+        load_plan: dict,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        self._mic = mic
         self._turbo_ref = turbo_model_ref
         self._load_plan = load_plan
+        self._loop = loop
+        self._queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         self._ring: list[np.ndarray] = []
         self._session_words: list[str] = []
-        self._prev_tail: list[str] = []      # last few words for textual overlap dedup
-        self._vocab_prompt: str | None = None  # cached for session lifetime
-        self._capture: AudioCapture | None = None
+        self._prev_tail: list[str] = []
+        self._vocab_prompt: str | None = None
         self._active = False
+        self._listener = None
 
     def _get_vocab_prompt(self) -> str:
         if self._vocab_prompt is None:
             self._vocab_prompt = load_vocabulary_prompt()
         return self._vocab_prompt
 
-    def open_mic(self, device_index: int | None = None) -> None:
-        self._capture = AudioCapture(device_index=device_index)
-        self._capture.open()
+    def _on_chunk_from_mic_thread(self, chunk: np.ndarray) -> None:
+        """Listener callback. Runs on PersistentMic background thread —
+        bridges into asyncio via the loop's thread-safe scheduler."""
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, chunk)
+        except RuntimeError:
+            # Loop already closed (sidecar shutting down); drop silently.
+            pass
+
+    def start_session(self) -> None:
+        """Snapshot pre-roll into ring buffer + subscribe to live chunks.
+        Must be called from the asyncio loop thread (read by _loop)."""
+        preroll = self._mic.snapshot_preroll()
+        if preroll:
+            self._ring.extend(preroll)
+        self._listener = self._on_chunk_from_mic_thread
+        self._mic.add_listener(self._listener)
         self._active = True
 
+    def stop_session(self) -> None:
+        """Stop accepting new chunks. Pre-existing queue contents stay so the
+        capture loop can drain them. Safe to call multiple times."""
+        self._active = False
+        if self._listener is not None:
+            self._mic.remove_listener(self._listener)
+            self._listener = None
+
+    # Legacy aliases kept for any caller not yet migrated.
     def stop_capture(self) -> None:
-        """Signal the capture loop to stop. Does NOT close the PyAudio stream."""
         self._active = False
 
     def close_stream(self) -> None:
-        """Close the PyAudio stream. Must only be called after the capture loop task has finished."""
-        if self._capture:
-            self._capture.close()
-            self._capture = None
+        self.stop_session()
 
     def close_mic(self) -> None:
-        """Legacy: stop + close in one call. Safe only when no capture thread is running."""
-        self.stop_capture()
-        self.close_stream()
+        self.stop_session()
 
     def is_active(self) -> bool:
         return self._active
+
+    async def read_chunk(self, timeout: float = 0.2) -> np.ndarray | None:
+        """Pull next chunk from queue. Returns None on timeout so the caller
+        can re-check the _active flag."""
+        try:
+            return await asyncio.wait_for(self._queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
 
     def flush_partial(self, chunk: np.ndarray) -> None:
         """Append remaining partial audio to ring so distil final pass gets complete session audio."""
@@ -129,6 +172,7 @@ class DictationSession:
                 word_timestamps=False,   # textual dedup instead — avoids expensive timestamp scan
                 language="en",
                 beam_size=1,
+                condition_on_previous_text=False,  # prevents hallucination feedback loops
                 initial_prompt=vocab_prompt or None,
             )
             segments = list(segments)

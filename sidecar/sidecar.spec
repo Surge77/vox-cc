@@ -54,6 +54,7 @@ a = Analysis(
         "transformers.models.whisper",
         # audio
         "pyaudio",
+        "sounddevice",
         # uvicorn lazy-loaded protocols (all required — none auto-discovered)
         "uvicorn.logging",
         "uvicorn.loops",
@@ -83,8 +84,8 @@ a = Analysis(
         "training",
         "training.train",
     ] + nr_hidden,
-    hookspath=[],
-    runtime_hooks=[],
+    hookspath=["hooks"],
+    runtime_hooks=["hooks/runtime_hook_path.py"],
     excludes=[],
     noarchive=False,
 )

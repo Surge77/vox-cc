@@ -35,7 +35,6 @@ def load_distil():
         DISTIL_MODEL_ID,
         device="cuda",
         compute_type="int8",
-        download_root=MODEL_DIR,
     )
 
 
@@ -54,15 +53,26 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> str:
 
         distil = load_distil()
 
+        # DEBUG: AGC bypass test — peak ~0.12, AGC 13x gain causes hard clipping at 1.0.
+        # distil-large-v3 handles quiet audio natively; clipped audio = garbage transcription.
+        from audio.vad import is_hallucination
+        audio_feed = audio_np
+
         vocab_prompt = _get_vocab_prompt()
         segments, _ = distil.transcribe(
-            audio_np,
+            audio_feed,
             language="en",
-            beam_size=5,
-            word_timestamps=False,
+            beam_size=5,                       # spec value — greedy beam=1 caused phonetic errors (fox→fog/bronze)
+            condition_on_previous_text=False,
+            word_timestamps=True,
             initial_prompt=vocab_prompt or None,
         )
-        result = " ".join(seg.text.strip() for seg in segments)
+        parts = []
+        for seg in segments:
+            text = seg.text.strip()
+            if text and not is_hallucination(text, seg.end - seg.start):
+                parts.append(text)
+        result = " ".join(parts)
         logger.info("distil final pass: %d chars, audio %.1fs", len(result), len(audio_np) / 16000)
 
     except Exception:
@@ -89,7 +99,7 @@ def reload_turbo_if_needed(turbo_model_ref: list) -> None:
     from faster_whisper import WhisperModel
     load_plan = _get_load_plan()
     turbo_model_ref[0] = WhisperModel(
-        os.path.join(MODEL_DIR, "whisper-large-v3-turbo-ct2"),
+        "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
         device=load_plan["turbo"],
         compute_type="int8" if load_plan["turbo"] == "cuda" else "float32",
     )

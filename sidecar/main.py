@@ -7,6 +7,11 @@ import socket
 import asyncio
 import warnings
 
+# Fix 6: CUDA unified memory — allows Turbo + LLM to share VRAM gracefully.
+# When VRAM fills up, CUDA automatically pages tensors to system RAM over PCIe
+# instead of crashing with OOM. Must be set before any torch/CUDA import.
+os.environ.setdefault("GGML_CUDA_ENABLE_UNIFIED_MEMORY", "1")
+
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 from contextlib import asynccontextmanager
 
@@ -36,6 +41,7 @@ _llm_ref: list = [None]
 _llm_loading: bool = False       # True while LLM loads in background; health reports llm:true during this window
 _pending_audio_uuid: str | None = None  # set by terminate_stream when collection on; cleared by /process-text
 _pending_latencies: dict | None = None  # set by terminate_stream; merged into passive_log by /process-text
+_mic_ref: list = [None]  # PersistentMicCapture | None — opened once at lifespan, reused across sessions
 
 
 PID_LOCK = os.path.join(os.path.expanduser("~"), ".vox", "data", "sidecar.pid")
@@ -135,38 +141,13 @@ def startup_critical() -> None:
     try:
         import numpy as np
         from faster_whisper import WhisperModel
-        from huggingface_hub import snapshot_download
 
-        # HF repo has safetensors format; faster-whisper needs CTranslate2 (model.bin).
-        # Download to staging dir then convert with ct2-transformers-converter on first run.
-        turbo_hf = os.path.join(MODEL_DIR, "whisper-large-v3-turbo")
-        turbo_ct2 = os.path.join(MODEL_DIR, "whisper-large-v3-turbo-ct2")
-
-        if not os.path.isfile(os.path.join(turbo_ct2, "model.bin")):
-            if not os.path.isfile(os.path.join(turbo_hf, "model.safetensors")):
-                print("Downloading whisper-large-v3-turbo (first run)...")
-                snapshot_download(
-                    repo_id="openai/whisper-large-v3-turbo",
-                    local_dir=turbo_hf,
-                )
-                print("Download complete.")
-            print("Converting to CTranslate2 INT8...")
-            import subprocess
-            ct2_exe = os.path.join(
-                os.path.dirname(sys.executable),
-                "ct2-transformers-converter.exe",
-            )
-            subprocess.run(
-                [ct2_exe, "--model", turbo_hf, "--output_dir", turbo_ct2,
-                 "--quantization", "int8", "--force"],
-                check=True,
-            )
-            print("Conversion complete.")
-            import shutil
-            shutil.copy2(os.path.join(turbo_hf, "preprocessor_config.json"), os.path.join(turbo_ct2, "preprocessor_config.json"))
-
+        # Pre-built CTranslate2 model — no safetensors download or conversion needed.
+        # Avoids ctranslate2 version/format mismatch from manual conversion.
+        # Pre-built CT2 model in global HF cache — no download_root so HF default cache is used.
+        TURBO_MODEL_ID = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
         turbo = WhisperModel(
-            turbo_ct2,
+            TURBO_MODEL_ID,
             device=_load_plan["turbo"],
             compute_type="int8" if _load_plan["turbo"] == "cuda" else "float32",
         )
@@ -195,9 +176,16 @@ def startup_critical() -> None:
 
     elif _load_plan.get("final_pass") == "distil_sequential":
         # File-existence check only — no trial load. Loading 1.5GB just to verify files is wasteful.
-        # faster-whisper stores HF downloads as models--{org}--{name} inside MODEL_DIR.
-        distil_ct2 = os.path.join(MODEL_DIR, "models--Systran--faster-distil-whisper-large-v3")
-        if os.path.isdir(distil_ct2):
+        # load_distil() uses global HF cache (no download_root), so check there.
+        # Do NOT check MODEL_DIR — stale local CT2 conversion may be incompatible with current ct2 version.
+        try:
+            from huggingface_hub import constants as _hf_c
+            _hf_hub_cache = _hf_c.HF_HUB_CACHE
+        except (ImportError, AttributeError):
+            _hf_hub_cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        distil_hf_dir = os.path.join(_hf_hub_cache, "models--Systran--faster-distil-whisper-large-v3")
+        distil_lora = os.path.join(MODEL_DIR, "distil-lora-ct2")
+        if os.path.isdir(distil_hf_dir) or os.path.isdir(distil_lora):
             _models_state["final_pass"] = True
             print("distil-large-v3 files verified.")
         else:
@@ -247,7 +235,13 @@ def startup_llm() -> None:
 
 
 def cleanup() -> None:
-    pass
+    mic = _mic_ref[0]
+    if mic is not None:
+        try:
+            mic.stop()
+        except Exception:
+            pass
+        _mic_ref[0] = None
 
 
 def _cleanup_old_logs(data_dir: str) -> None:
@@ -302,11 +296,43 @@ def _cleanup_old_logs(data_dir: str) -> None:
                 pass
 
 
+def start_persistent_mic() -> None:
+    """Open the mic once at sidecar startup and keep it open for the process
+    lifetime. Subsequent sessions snapshot a pre-roll from this stream — this
+    is what eliminates the ~2s WASAPI warmup latency that was silently
+    chopping off the first words of every dictation."""
+    global _mic_ref
+    try:
+        from audio.capture import AudioCapture, PersistentMicCapture
+        import json
+        settings: dict = {}
+        try:
+            with open(os.path.join(DATA_DIR, "settings.json")) as f:
+                settings = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        cap = AudioCapture(
+            device_index=settings.get("audio_device_index"),
+            exclusive_mode=settings.get("exclusive_mode", False),
+            prefer_pyaudio=settings.get("prefer_pyaudio", False),
+        )
+        mic = PersistentMicCapture(cap, preroll_seconds=3.0)
+        mic.start()
+        _mic_ref[0] = mic
+        print("Persistent mic started (pre-roll 3.0s).")
+    except Exception as e:
+        print(f"WARNING: Persistent mic failed to start: {e}", file=sys.stderr)
+        _mic_ref[0] = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _llm_loading
     # Critical path: Turbo + distil file check (~10-15s). Unblocks health endpoint.
     await asyncio.to_thread(startup_critical)
+    # Persistent mic: open BEFORE LLM background load so it's warm by the
+    # time the user can possibly press the hotkey.
+    await asyncio.to_thread(start_persistent_mic)
     # Set flag BEFORE yield so the first health poll after startup sees llm:true.
     # Without this, a poll between yield and task-start sees llm=false → sidecar-degraded.
     _llm_loading = True

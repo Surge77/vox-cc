@@ -6,6 +6,7 @@
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
+    "core:window:allow-set-position",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-unregister-all",

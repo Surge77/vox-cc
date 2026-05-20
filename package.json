@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:clean": "powershell -ExecutionPolicy Bypass -NoProfile -File scripts/run.ps1",
+    "kill-ghosts": "powershell -ExecutionPolicy Bypass -NoProfile -Command \"Get-Process vox -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter \\\"Name='python.exe'\\\" | Where-Object { $_.CommandLine -match 'vox.*sidecar|sidecar.*main\\.py' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }\"",
     "build": "tsc && vite build",
     "tauri": "tauri",
     "pack-sidecar": "powershell -Command \"Compress-Archive -Path sidecar/dist/sidecar/_internal -DestinationPath sidecar/dist/vox-sidecar-internal.zip -Force\""
