@@ -6,7 +6,6 @@ export type AppStatus =
   | "waiting_for_models"
   | "degraded"
   | "idle"
-  | "capturing"
   | "recording"
   | "streaming"
   | "finalizing"
@@ -335,14 +334,9 @@ function OverlayCard({
     );
   }
 
-  if (
-    status === "capturing" ||
-    status === "recording" ||
-    status === "streaming"
-  ) {
+  if (status === "recording" || status === "streaming") {
     const hasPartial = !!partial;
-    const trailingLabel =
-      status === "capturing" ? "Starting…" : hasPartial ? "" : "Listening…";
+    const trailingLabel = hasPartial ? "" : "Listening…";
 
     return (
       <div className="vox-capsule vox-capsule-active" style={CAPSULE}>

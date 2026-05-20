@@ -95,6 +95,31 @@ async def set_audio_settings(req: AudioSettingsRequest):
     return {"ok": True}
 
 
+class DictationSettingsRequest(BaseModel):
+    auto_stop_enabled: bool | None = None
+    auto_stop_threshold_ms: int | None = None
+
+
+@router.post("/settings/dictation")
+async def set_dictation_settings(req: DictationSettingsRequest):
+    import main as state
+    settings_path = os.path.join(state.DATA_DIR, "settings.json")
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        settings = {}
+    if req.auto_stop_enabled is not None:
+        settings["auto_stop_enabled"] = req.auto_stop_enabled
+    if req.auto_stop_threshold_ms is not None:
+        # Clamp to safe range — UI slider is 1000-3000 but be defensive
+        settings["auto_stop_threshold_ms"] = max(500, min(5000, req.auto_stop_threshold_ms))
+    os.makedirs(state.DATA_DIR, exist_ok=True)
+    with open(settings_path, "w") as f:
+        json.dump(settings, f)
+    return {"ok": True}
+
+
 class PrivacySettingsRequest(BaseModel):
     retention_days: int | None = None
 

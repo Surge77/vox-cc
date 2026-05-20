@@ -1,7 +1,12 @@
 import asyncio
+import json
 import os
+import queue
+import re
+import threading
 import time
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -18,11 +23,42 @@ class ProcessTextRequest(BaseModel):
     use_local_llm: bool = True
     custom_vocabulary: list[str] = []
     style: str = "auto"
+    skip_llm_if_simple: bool = False
 
 
 class ProcessTextResponse(BaseModel):
     cleaned_text: str
     error: str | None = None
+    skipped_llm: bool = False
+
+
+# ── Smart skip-LLM heuristic ──────────────────────────────────────────────────
+# When distil output is short + grammatically complete, the LLM cleanup pass
+# rarely changes anything. Skipping saves ~1.5 s per dictation.
+
+SKIP_LLM_MAX_CHARS = 60
+_ASR_MARKERS = ("<unk>", "[noise]", "[music]", "[laughter]", "♪", "♫")
+_SENTENCE_RE = re.compile(r"^[A-Z][^<>\[\]]*[.!?]$")
+
+
+def is_simple_clean_text(text: str) -> bool:
+    """True iff text is short enough + grammatically complete + no ASR markers
+    + no all-caps words (which usually signal acronyms the LLM should handle).
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) > SKIP_LLM_MAX_CHARS:
+        return False
+    low = stripped.lower()
+    if any(m in low for m in _ASR_MARKERS):
+        return False
+    if not _SENTENCE_RE.match(stripped):
+        return False
+    # All-caps tokens longer than 1 char usually need vocab/expansion (IDE, API)
+    for word in stripped.split():
+        bare = word.strip(",.!?;:\"'()")
+        if len(bare) > 1 and bare.isupper():
+            return False
+    return True
 
 
 @router.post("/process-text", response_model=ProcessTextResponse)
@@ -40,6 +76,11 @@ async def process_text(req: ProcessTextRequest):
 
     if not raw:
         return ProcessTextResponse(cleaned_text="")
+
+    if req.skip_llm_if_simple and is_simple_clean_text(raw):
+        cleaned = _expand_snippets(state.DATA_DIR, raw)
+        _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name, None)
+        return ProcessTextResponse(cleaned_text=cleaned, skipped_llm=True)
 
     cleaned = raw
     error = None
@@ -147,3 +188,112 @@ def _append_passive_log(
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
+
+
+# ── SSE streaming variant of /process-text ────────────────────────────────────
+# Used by the frontend's "Stream text as the LLM generates" feature: instead of
+# waiting for the full cleaned transcript, callers receive each delta as it is
+# produced. The Rust side types each delta with `inject_text_chunk`.
+
+
+def _sse_pack(event: str, data: dict | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@router.post("/process-text/stream")
+async def process_text_stream(req: ProcessTextRequest):
+    import main as state
+    from models.prompt_router import render_system_prompt
+
+    system_prompt = render_system_prompt(
+        req.executable_name,
+        preceding_text=req.text_preceding_cursor,
+        vocabulary=req.custom_vocabulary or [],
+        style=req.style,
+    )
+    raw = req.raw_transcript.strip()
+
+    # Skip-LLM heuristic still applies in streaming mode: a one-line response
+    # is cheap to send and avoids spinning up the model for trivial inputs.
+    if not raw:
+
+        async def _empty():
+            yield _sse_pack("done", {"cleaned_text": ""})
+
+        return StreamingResponse(_empty(), media_type="text/event-stream")
+
+    if req.skip_llm_if_simple and is_simple_clean_text(raw):
+        cleaned = _expand_snippets(state.DATA_DIR, raw)
+        _append_passive_log(state.DATA_DIR, raw, cleaned, req.executable_name, None)
+
+        async def _skip():
+            yield _sse_pack("delta", {"text": cleaned})
+            yield _sse_pack("done", {"cleaned_text": cleaned, "skipped_llm": True})
+
+        return StreamingResponse(_skip(), media_type="text/event-stream")
+
+    # Producer thread drives the (sync) llama-cpp generator; queue bridges into
+    # asyncio. The sentinel `None` marks completion; exceptions propagate as a
+    # second-item tuple so the async side can emit an SSE error.
+    use_local = req.use_local_llm and bool(state._models_state.get("llm"))
+    groq_key = "" if use_local else _load_groq_key()
+
+    if not use_local and not groq_key:
+
+        async def _no_key():
+            yield _sse_pack("delta", {"text": raw})
+            yield _sse_pack(
+                "done", {"cleaned_text": raw, "error": "no groq key"}
+            )
+
+        return StreamingResponse(_no_key(), media_type="text/event-stream")
+
+    q: "queue.Queue[tuple[str | None, str | None]]" = queue.Queue()
+
+    def _producer():
+        try:
+            from models.llm_engine import run_llm_stream, run_groq_stream
+            if use_local:
+                stream_iter = run_llm_stream(state._llm_ref[0], system_prompt, raw)
+            else:
+                stream_iter = run_groq_stream(groq_key, system_prompt, raw)
+            for delta in stream_iter:
+                q.put((delta, None))
+        except Exception as e:  # noqa: BLE001 — propagate to client
+            q.put((None, str(e)))
+            return
+        q.put((None, None))
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    async def _stream():
+        full_text_parts: list[str] = []
+        error: str | None = None
+        t0 = time.monotonic()
+        while True:
+            try:
+                delta, err = await asyncio.to_thread(q.get, True, 30.0)
+            except queue.Empty:
+                error = "timeout"
+                break
+            if err is not None:
+                error = err
+                break
+            if delta is None:
+                break
+            full_text_parts.append(delta)
+            yield _sse_pack("delta", {"text": delta})
+
+        cleaned = "".join(full_text_parts).strip() or raw
+        cleaned = _expand_snippets(state.DATA_DIR, cleaned)
+        llm_ms = int((time.monotonic() - t0) * 1000)
+        _append_passive_log(
+            state.DATA_DIR, raw, cleaned, req.executable_name, llm_ms
+        )
+        yield _sse_pack(
+            "done", {"cleaned_text": cleaned, "error": error}
+        )
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")

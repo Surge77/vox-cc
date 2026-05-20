@@ -357,16 +357,141 @@ fn inject_sync(text: &str, target_hwnd_raw: Option<isize>) -> Result<(), String>
     Ok(())
 }
 
+/// Types `text` directly into `hwnd_raw` via enigo's text() API — no
+/// clipboard touch, so no Win+V history pollution and no risk of restoring
+/// the user's previous clipboard mid-stream. Designed for chunked use from
+/// the SSE streaming flow: caller invokes once per LLM delta.
+fn inject_text_chunk_sync(text: &str, hwnd_raw: isize) -> Result<(), String> {
+    let _com = ComGuard::init();
+    let target: HWND = if hwnd_raw != 0
+        && unsafe { IsWindow(HWND(hwnd_raw)).as_bool() }
+        && unsafe { IsWindowVisible(HWND(hwnd_raw)).as_bool() }
+    {
+        HWND(hwnd_raw)
+    } else {
+        unsafe { GetForegroundWindow() }
+    };
+    if target.0 == 0 {
+        return Err("no target window".to_string());
+    }
+    // UAC guard — silent failure here would let the LLM stream into nothing
+    let mut target_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(target, Some(&mut target_pid)); }
+    if target_pid != 0 && !is_self_elevated() && is_process_elevated(target_pid) {
+        return Err("elevation_mismatch".to_string());
+    }
+    force_foreground(target);
+    let mut enigo = Enigo::new(&EnigoSettings::default()).map_err(|e| e.to_string())?;
+    enigo.text(text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Sends Ctrl+Z to `hwnd_raw` (or the foreground window if 0/stale). Used by
+/// the undo hotkey. Synchronous; runs on whichever thread invokes it.
+pub fn undo_in_target(hwnd_raw: isize) {
+    let _com = ComGuard::init();
+    let target: HWND = if hwnd_raw != 0
+        && unsafe { IsWindow(HWND(hwnd_raw)).as_bool() }
+        && unsafe { IsWindowVisible(HWND(hwnd_raw)).as_bool() }
+    {
+        HWND(hwnd_raw)
+    } else {
+        unsafe { GetForegroundWindow() }
+    };
+    if target.0 == 0 {
+        return;
+    }
+    force_foreground(target);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    if let Ok(mut enigo) = Enigo::new(&EnigoSettings::default()) {
+        let _ = enigo.key(Key::Control, Direction::Press);
+        let _ = enigo.key(Key::Unicode('z'), Direction::Click);
+        let _ = enigo.key(Key::Control, Direction::Release);
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Tauri command
+// Tauri commands
 // ---------------------------------------------------------------------------
 #[tauri::command]
 pub async fn inject_text(
     text: String,
     hwnd_state: tauri::State<'_, crate::TargetHwnd>,
+    last_inject: tauri::State<'_, crate::LastInject>,
 ) -> Result<(), String> {
     let raw = hwnd_state.0.lock().map_err(|e| e.to_string())?.take();
-    tokio::task::spawn_blocking(move || inject_sync(&text, raw))
+    let text_len = text.chars().count();
+    let text_for_thread = text.clone();
+    let raw_for_thread = raw;
+    let result = tokio::task::spawn_blocking(move || inject_sync(&text_for_thread, raw_for_thread))
+        .await
+        .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        // Record the actual HWND used so undo targets the same window — fall
+        // back to the captured raw value if Win32 lookups upstream cleared it.
+        let resolved = raw.unwrap_or(0);
+        if let Ok(mut guard) = last_inject.0.lock() {
+            *guard = Some((resolved, text_len));
+        }
+    }
+    result
+}
+
+/// Begin a streaming-inject session. Takes the captured target HWND from
+/// `TargetHwnd` and stores it in `StreamTarget` so subsequent `inject_text_chunk`
+/// calls can target the right window across the LLM token stream.
+#[tauri::command]
+pub async fn begin_stream_inject(
+    hwnd_state: tauri::State<'_, crate::TargetHwnd>,
+    stream_target: tauri::State<'_, crate::StreamTarget>,
+) -> Result<(), String> {
+    let raw = hwnd_state.0.lock().map_err(|e| e.to_string())?.take();
+    *stream_target.0.lock().map_err(|e| e.to_string())? = raw;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn inject_text_chunk(
+    text: String,
+    stream_target: tauri::State<'_, crate::StreamTarget>,
+) -> Result<(), String> {
+    let raw = stream_target
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    tokio::task::spawn_blocking(move || inject_text_chunk_sync(&text, raw))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Close out a streaming-inject session: records final state for undo
+/// (so Ctrl+Shift+Z still works after a streamed injection) and clears
+/// the in-flight target.
+#[tauri::command]
+pub async fn end_stream_inject(
+    total_len: usize,
+    stream_target: tauri::State<'_, crate::StreamTarget>,
+    last_inject: tauri::State<'_, crate::LastInject>,
+) -> Result<(), String> {
+    let raw = stream_target.0.lock().map_err(|e| e.to_string())?.take();
+    let resolved = raw.unwrap_or(0);
+    if let Ok(mut guard) = last_inject.0.lock() {
+        *guard = Some((resolved, total_len));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn undo_last_inject(
+    last_inject: tauri::State<'_, crate::LastInject>,
+) -> Result<bool, String> {
+    let snapshot = last_inject.0.lock().map_err(|e| e.to_string())?.take();
+    let Some((hwnd_raw, _len)) = snapshot else {
+        return Ok(false);
+    };
+    tokio::task::spawn_blocking(move || undo_in_target(hwnd_raw))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }

@@ -25,21 +25,41 @@ def _save_debug_wav(audio_np: np.ndarray, path: str) -> None:
         wf.writeframes(pcm16.tobytes())
 
 
-def _dump_session_debug(session: DictationSession, state) -> None:
-    """Always-on debug dump. Writes raw + AGC'd full-session audio to ~/.vox/data/debug/."""
+def _write_debug_wavs(raw: np.ndarray, data_dir: str) -> None:
+    """Worker: persist raw + AGC'd audio to disk. Safe to run off the
+    critical path because it operates on a captured numpy array, not on
+    the live session object."""
     try:
         from audio.vad import apply_agc
-        raw = session.get_full_audio()
         if len(raw) == 0:
             return
-        debug_dir = os.path.join(state.DATA_DIR, "debug")
+        debug_dir = os.path.join(data_dir, "debug")
         _save_debug_wav(raw, os.path.join(debug_dir, "last_raw.wav"))
         _save_debug_wav(apply_agc(raw), os.path.join(debug_dir, "last_agc.wav"))
         rms = float(np.sqrt(np.mean(raw ** 2)))
         peak = float(np.max(np.abs(raw)))
-        print(f"[sidecar] debug wav: dur={len(raw)/16000:.2f}s rms={rms:.4f} peak={peak:.4f} dir={debug_dir}", flush=True)
+        print(
+            f"[sidecar] debug wav: dur={len(raw)/16000:.2f}s "
+            f"rms={rms:.4f} peak={peak:.4f} dir={debug_dir}",
+            flush=True,
+        )
     except Exception as e:
         print(f"[sidecar] debug wav save failed: {e}", flush=True)
+
+
+def _dump_session_debug_async(session: DictationSession, state) -> None:
+    """Snapshot the session audio on the caller's thread, then kick off the
+    actual file writes in a background task so they do not block the
+    handoff_ready / inject critical path."""
+    raw = session.get_full_audio()
+    if len(raw) == 0:
+        return
+    # Detach the numpy buffer from the session — subsequent session.reset()
+    # will clear the ring but our snapshot stays valid.
+    snapshot = raw.copy()
+    asyncio.create_task(
+        asyncio.to_thread(_write_debug_wavs, snapshot, state.DATA_DIR)
+    )
 
 
 def _maybe_save_audio(session: DictationSession, state) -> None:
@@ -248,7 +268,7 @@ async def dictation_ws(ws: WebSocket):
                     # Capture loop has unsubscribed; safe to flush state.
                     session.stop_session()
                     _maybe_save_audio(session, state)
-                    _dump_session_debug(session, state)
+                    _dump_session_debug_async(session, state)
                     fallback = session.build_turbo_fallback()
                     t0 = time.monotonic()
                     print("[sidecar] running final pass", flush=True)
@@ -310,9 +330,23 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
     background thread). When session goes inactive, drains for ≤2s waiting
     for 700ms silence so trailing words spoken after key-release are kept."""
     from audio.pipeline import CHUNK_SAMPLES, SAMPLE_RATE
+    from audio.vad import SilenceDetector
     import numpy as np
     accumulator: list = []
     accumulated = 0
+
+    # Auto-stop on silence: optional per-user setting persisted in settings.json
+    auto_stop_detector: SilenceDetector | None = None
+    try:
+        settings_path = os.path.join(state.DATA_DIR, "settings.json")
+        with open(settings_path) as f:
+            _audio_settings = json.load(f)
+        if _audio_settings.get("auto_stop_enabled", False):
+            threshold_ms = int(_audio_settings.get("auto_stop_threshold_ms", 1500))
+            auto_stop_detector = SilenceDetector(threshold_ms=threshold_ms)
+            print(f"[sidecar] auto-stop armed: threshold={threshold_ms}ms", flush=True)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
     try:
         chunk_idx = 0
@@ -337,6 +371,40 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
             accumulated += len(chunk)
             chunk_idx += 1
             peak_rms = max(peak_rms, rms)
+
+            if auto_stop_detector is not None and auto_stop_detector.feed(chunk):
+                print(
+                    f"[sidecar] auto-stop: silence threshold reached after {chunk_idx} chunks",
+                    flush=True,
+                )
+                # Flush whatever is in the accumulator so distil sees the trailing audio
+                if accumulator:
+                    session.flush_partial(np.concatenate(accumulator))
+                    accumulator = []
+                    accumulated = 0
+                session.stop_capture()
+                session.stop_session()
+                fallback = session.build_turbo_fallback()
+                t0 = time.monotonic()
+                final_text = await _run_final_pass(session, state, fallback, ws)
+                final_pass_ms = int((time.monotonic() - t0) * 1000)
+                state._pending_latencies = {
+                    "capture_stop_ms": int(t0 * 1000),
+                    "final_pass_ms": final_pass_ms,
+                }
+                result = final_text or fallback
+                print(
+                    f"[sidecar] auto-stop: final_pass len={len(result)} preview={result[:60]!r}",
+                    flush=True,
+                )
+                try:
+                    await ws.send_json({"type": "stream_stopped"})
+                    await ws.send_json({"type": "handoff_ready", "canary_transcript": result})
+                except Exception:
+                    pass
+                session.reset()
+                state._session_active = False
+                return
 
             if rms > 0.0001:
                 zero_streak = 0
@@ -400,8 +468,12 @@ async def _capture_loop(session: DictationSession, ws: WebSocket, state) -> None
         _drain_start = _time.monotonic()
         _silence_samples = 0
         _SILENCE_FLOOR = 0.0005
-        _SILENCE_TARGET = int(0.70 * SAMPLE_RATE)
-        _DRAIN_MAX_S = 1.5  # was 2.0 — VAD-target still 700ms, hard cap reduced
+        # 400ms silence target / 800ms hard cap — was 700ms / 1.5s. The
+        # persistent mic + pre-roll covers any pre-press audio, and 400ms
+        # post-release is enough slack for the typical "last syllable" trail
+        # without padding the perceived processing latency.
+        _SILENCE_TARGET = int(0.40 * SAMPLE_RATE)
+        _DRAIN_MAX_S = 0.8
         print("[sidecar] drain: capturing trailing speech...", flush=True)
         while (_time.monotonic() - _drain_start) < _DRAIN_MAX_S:
             _dc = await session.read_chunk(timeout=0.2)

@@ -13,6 +13,17 @@ pub struct SidecarChild(pub Mutex<Option<tauri_plugin_shell::process::CommandChi
 /// read this instead of re-querying `GetForegroundWindow()` at their own call time.
 pub struct TargetHwnd(pub Mutex<Option<isize>>);
 
+/// Records the most recent successful injection so the user can undo + re-record
+/// via Ctrl+Shift+Z. Tuple: (target_hwnd_raw, injected_text_len). Cleared after
+/// a successful undo so repeated presses do not loop.
+pub struct LastInject(pub Mutex<Option<(isize, usize)>>);
+
+/// In-flight target HWND for streaming inject. Set by `begin_stream_inject`,
+/// read by every `inject_text_chunk` call during the stream, cleared by
+/// `end_stream_inject`. Kept separate from `TargetHwnd` (which is a single-shot
+/// take()-on-inject slot) so the stream survives the consume.
+pub struct StreamTarget(pub Mutex<Option<isize>>);
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -20,11 +31,17 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(SidecarChild(Mutex::new(None)))
         .manage(TargetHwnd(Mutex::new(None)))
+        .manage(LastInject(Mutex::new(None)))
+        .manage(StreamTarget(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::audio::ensure_mic_volume,
             commands::context::get_focused_context,
             commands::hotkey::set_hotkey,
             commands::inject::inject_text,
+            commands::inject::begin_stream_inject,
+            commands::inject::inject_text_chunk,
+            commands::inject::end_stream_inject,
+            commands::inject::undo_last_inject,
             commands::windows::position_overlay,
             commands::windows::hide_main_window,
             commands::windows::open_settings_window,
@@ -109,6 +126,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     {
         let saved = commands::hotkey::read_saved_hotkey();
         commands::hotkey::register_hotkey(app.handle(), &saved)?;
+    }
+
+    // Register Ctrl+Shift+Z undo-and-re-record hotkey.
+    // Failure is non-fatal — if another app holds this combo, log and continue.
+    if let Err(e) = commands::hotkey::register_undo_hotkey(app.handle()) {
+        eprintln!("[hotkey] undo hotkey not registered: {e}");
     }
 
     // System tray

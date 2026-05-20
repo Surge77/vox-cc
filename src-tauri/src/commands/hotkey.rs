@@ -67,6 +67,8 @@ pub async fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), Str
         .unregister_all()
         .map_err(|e| e.to_string())?;
     register_hotkey(&app, &hotkey)?;
+    // Re-arm the undo hotkey too — `unregister_all` cleared it.
+    register_undo_hotkey(&app).ok();
     if let Some(path) = hotkey_file() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -74,4 +76,35 @@ pub async fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), Str
         std::fs::write(&path, &hotkey).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Registers Ctrl+Shift+Z as a global undo-and-re-record shortcut.
+/// On press: undo the last injection in the target window (Ctrl+Z) and emit
+/// `undo-pressed` so the frontend can immediately restart recording with the
+/// original context.
+pub fn register_undo_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut("CommandOrControl+Shift+Z", move |_, _, event| {
+            // Only act on press — Released would double-fire the undo.
+            if !matches!(event.state(), ShortcutState::Pressed) {
+                return;
+            }
+            // Snapshot last-inject state and undo on the target's behalf.
+            // Failures are silent — there is nothing to undo if state is empty.
+            let snapshot = handle
+                .try_state::<crate::LastInject>()
+                .and_then(|s| s.0.lock().ok().map(|g| *g))
+                .flatten();
+            if let Some((hwnd_raw, _len)) = snapshot {
+                crate::commands::inject::undo_in_target(hwnd_raw);
+                if let Some(state) = handle.try_state::<crate::LastInject>() {
+                    if let Ok(mut g) = state.0.lock() {
+                        *g = None;
+                    }
+                }
+            }
+            handle.emit("undo-pressed", ()).ok();
+        })
+        .map_err(|e| e.to_string())
 }

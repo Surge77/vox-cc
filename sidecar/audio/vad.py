@@ -196,3 +196,47 @@ def vad_trim_audio(audio: np.ndarray, sample_rate: int = 16000, padding_ms: int 
     except Exception:
         logger.exception("vad_trim_audio failed — using original audio")
         return audio
+
+
+# ---------------------------------------------------------------------------
+# Auto-stop silence detector — stateful, pure-Python.
+# Fed one chunk at a time from the capture loop; reports when post-speech
+# silence has lasted longer than the configured threshold.
+# ---------------------------------------------------------------------------
+class SilenceDetector:
+    """Tracks rolling post-speech silence over streamed audio chunks.
+
+    Designed for use by `routers/dictation._capture_loop` to implement
+    auto-stop-on-silence: ignore leading silence (user hasn't spoken yet),
+    arm after the first speech-level chunk, then count contiguous silent
+    samples until threshold is exceeded.
+
+    Pure logic — no I/O. Sample rate fixed at 16000 to match the pipeline."""
+
+    def __init__(
+        self,
+        threshold_ms: int,
+        floor_rms: float = NOISE_RMS_FLOOR,
+        sample_rate: int = 16000,
+    ):
+        self.threshold_samples = max(1, int(threshold_ms * sample_rate / 1000))
+        self.floor_rms = floor_rms
+        self._speech_seen = False
+        self._silence_samples = 0
+
+    def feed(self, chunk: np.ndarray) -> bool:
+        """Returns True iff post-speech silence has exceeded threshold."""
+        rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) else 0.0
+        if rms >= self.floor_rms:
+            self._speech_seen = True
+            self._silence_samples = 0
+            return False
+        if not self._speech_seen:
+            # Still waiting for the user to start speaking
+            return False
+        self._silence_samples += len(chunk)
+        return self._silence_samples >= self.threshold_samples
+
+    def reset(self) -> None:
+        self._speech_seen = False
+        self._silence_samples = 0

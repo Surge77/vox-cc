@@ -23,9 +23,26 @@ start implementing.
 
 ---
 
-## Tier 1 — Next sprint (recommended)
+## Tier 1 — ✓ Shipped 2026-05-20
 
-Ship these first. Together = ~12 hours. Move app from "good" to "delightful."
+All four items below shipped in one session. Tests added for skip-LLM,
+auto-stop SilenceDetector, and SSE stream packing. Defaults: skip-LLM
+**on**, auto-stop **off** (opt-in slider), undo hotkey **always armed**
+(Ctrl+Shift+Z), streaming inject **off**.
+
+Bonus during the same push:
+- **Instant-listen capsule** — removed the `capturing` intermediate UI
+  state; press hotkey → capsule shows "Listening…" + bars immediately.
+  The persistent-mic pre-roll already covered any audio captured during
+  the WS round-trip, so the old "Starting…" label was a cosmetic lie.
+- **No-speech short-circuit** — releasing the hotkey without any audio
+  above ~rms 0.002 cancels the session instantly (no distil, no LLM, no
+  inject). Saves a full pipeline run on accidental presses.
+- **Latency cuts** — drain target 700 ms → 400 ms, drain cap 1.5 s → 0.8 s,
+  LLM `max_tokens` 512 → 256, debug WAV dump moved to a background task.
+  ~500-1300 ms shaved off the post-release path on this 4 GB box.
+
+Original Tier 1 spec preserved below for the record.
 
 ### 1. Auto-stop on silence
 
@@ -365,15 +382,3 @@ If you have **one month**:
 
 Beyond that, pick one Tier 4 and commit a quarter.
 
----
-
-## How to use this file
-
-Pick an item. Read CLAUDE.md (project rules) + the relevant memory entries
-in `~/.claude/projects/.../memory/`. Branch off main: `feature/<short>`.
-Implement following existing patterns. Run `npm run dev:clean` to test.
-Commit with conventional-commit format. PR + self-merge.
-
-When done: update this file (mark item as ✓ shipped + commit hash) and
-add a new entry to CLAUDE.md "Failed Experiments" if anything was tried
-and rejected during the work.

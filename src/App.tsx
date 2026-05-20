@@ -10,7 +10,6 @@ type AppState =
   | { status: "waiting_for_models" }
   | { status: "degraded"; missing: string[] }
   | { status: "idle" }
-  | { status: "capturing" }
   | { status: "recording" }
   | { status: "streaming"; partial: string }
   | { status: "finalizing" }
@@ -73,6 +72,7 @@ interface ProcessTextRequest {
   use_local_llm: boolean;
   custom_vocabulary: string[];
   style?: string;
+  skip_llm_if_simple?: boolean;
 }
 
 // ── Port discovery ─────────────────────────────────────────────────────────────
@@ -131,37 +131,28 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "MODELS_DEGRADED":
       return { status: "degraded", missing: action.missing };
     case "START_RECORDING":
-      if (state.status === "idle") return { status: "capturing" };
+      // Skip the legacy `capturing` intermediate state — the persistent mic +
+      // 3 s pre-roll deque means audio capture is already live at hotkey-press.
+      // Showing "Listening…" + bars immediately is accurate, not a lie.
+      if (state.status === "idle") return { status: "recording" };
       return state;
     case "STREAM_STARTED":
-      if (state.status === "capturing") return { status: "recording" };
+      // Confirmation no-op now — state already advanced to recording.
       return state;
     case "STREAM_STOPPED":
       if (state.status === "recording" || state.status === "streaming")
         return { status: "finalizing" };
       return state;
     case "STOP_RECORDING":
-      if (
-        state.status === "capturing" ||
-        state.status === "recording" ||
-        state.status === "streaming"
-      )
+      if (state.status === "recording" || state.status === "streaming")
         return { status: "finalizing" };
       return state;
     case "CANCEL_RECORDING":
-      if (
-        state.status === "capturing" ||
-        state.status === "recording" ||
-        state.status === "streaming"
-      )
+      if (state.status === "recording" || state.status === "streaming")
         return { status: "idle" };
       return state;
     case "PARTIAL_UPDATE":
-      if (
-        state.status === "capturing" ||
-        state.status === "recording" ||
-        state.status === "streaming"
-      )
+      if (state.status === "recording" || state.status === "streaming")
         return { status: "streaming", partial: action.content };
       return state;
     case "HANDOFF_READY":
@@ -196,9 +187,6 @@ function useWebSocket(
   const retryTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const retryDelayRef = useRef(500);
   const activeRef = useRef(true);
-  // Fallback: if sidecar doesn't send stream_started, first audio_level promotes
-  // capturing → recording so the capsule isn't stuck invisible.
-  const streamStartedRef = useRef(false);
 
   const connect = useCallback(() => {
     if (sidecarPort === 0) {
@@ -231,14 +219,10 @@ function useWebSocket(
         if (Array.isArray(msg.bands) && msg.bands.length === 11) {
           bandsRef.current = msg.bands as number[];
         }
-        // Speech-detected only triggers stream_started promotion DURING a session.
-        // Idle meter now streams 30 Hz at all times; reusing it for "speech started"
-        // would mis-fire on ambient noise. Sidecar still sends explicit stream_started.
+        // Speech-detected gates the no-speech short-circuit in hotkey-released.
+        // Idle meter runs 30 Hz at all times; only mark detected during sessions
+        // (reducer ignores STREAM_STARTED now — recording state set on press).
         if (msg.level > 0.064) speechDetectedRef.current = true;
-        if (!streamStartedRef.current && msg.level > 0.05) {
-          streamStartedRef.current = true;
-          dispatch({ type: "STREAM_STARTED" });
-        }
         return; // high-frequency, no logging
       }
 
@@ -341,7 +325,6 @@ function useWebSocket(
   }, []);
 
   const beginStream = useCallback(() => {
-    streamStartedRef.current = false; // reset per-session so fallback fires again
     let deviceIndex: number | null = null;
     try {
       const raw = localStorage.getItem("vox_settings");
@@ -414,6 +397,8 @@ export default function App() {
           return JSON.parse(localStorage.getItem("vox_settings") ?? "{}") as {
             defaultStyle?: string;
             useLlm?: boolean;
+            skipLlmIfSimple?: boolean;
+            streamingInject?: boolean;
           };
         } catch {
           return {};
@@ -430,8 +415,105 @@ export default function App() {
         use_local_llm: storedSettings.useLlm ?? true,
         custom_vocabulary: [],
         style: storedSettings.defaultStyle ?? "auto",
+        skip_llm_if_simple: storedSettings.skipLlmIfSimple ?? true,
       };
 
+      let elevationError = false;
+
+      if (storedSettings.streamingInject && body.use_local_llm !== false) {
+        // SSE path: stream LLM deltas, type each as it arrives. Bypasses
+        // clipboard entirely; total length tracked for undo-state recording.
+        let totalLen = 0;
+        try {
+          await invoke("begin_stream_inject");
+        } catch (e) {
+          console.error("[vox] begin_stream_inject failed:", e);
+        }
+        try {
+          const resp = await fetch(
+            `http://127.0.0.1:${sidecarPort}/process-text/stream`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(60_000),
+            },
+          );
+          if (!resp.ok || !resp.body) {
+            throw new Error(`stream HTTP ${resp.status}`);
+          }
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let buffer = "";
+          // SSE events: blank-line-separated; each block has `event:` + `data:`.
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let blankIdx = buffer.indexOf("\n\n");
+            while (blankIdx !== -1) {
+              const block = buffer.slice(0, blankIdx);
+              buffer = buffer.slice(blankIdx + 2);
+              const lines = block.split("\n");
+              let event = "message";
+              let data = "";
+              for (const ln of lines) {
+                if (ln.startsWith("event:")) event = ln.slice(6).trim();
+                else if (ln.startsWith("data:")) data += ln.slice(5).trim();
+              }
+              if (event === "delta" && data) {
+                try {
+                  const parsed = JSON.parse(data) as { text?: string };
+                  if (parsed.text) {
+                    totalLen += parsed.text.length;
+                    try {
+                      await invoke("inject_text_chunk", { text: parsed.text });
+                    } catch (err) {
+                      const m = String(err);
+                      if (m.includes("elevation_mismatch")) {
+                        elevationError = true;
+                        dispatch({
+                          type: "ERROR",
+                          message: "Elevated app — run Vox as Administrator",
+                        });
+                        return;
+                      }
+                      console.error("[vox] inject_text_chunk failed:", err);
+                    }
+                  }
+                } catch {
+                  // malformed JSON in delta — skip
+                }
+              }
+              blankIdx = buffer.indexOf("\n\n");
+            }
+          }
+        } catch (e) {
+          // Fall through to non-streamed fallback so user still gets text.
+          console.warn(
+            "[vox] streaming inject failed, falling back to clipboard:",
+            e,
+          );
+          try {
+            await invoke("inject_text", { text: canaryTranscript });
+          } catch (err) {
+            console.error("[vox] fallback inject_text failed:", err);
+          }
+        } finally {
+          try {
+            await invoke("end_stream_inject", { totalLen });
+          } catch (e) {
+            console.error("[vox] end_stream_inject failed:", e);
+          }
+          contextRef.current = null;
+          if (!elevationError) {
+            dispatch({ type: "INJECTION_DONE" });
+          }
+        }
+        return;
+      }
+
+      // Non-streaming path: single round-trip then clipboard inject.
       let textToInject = canaryTranscript;
       try {
         console.log(
@@ -463,7 +545,6 @@ export default function App() {
         console.warn("[vox] process-text fetch failed, injecting raw:", e);
       }
 
-      let elevationError = false;
       try {
         console.log(
           "[vox] handleHandoff: invoking inject_text text_len=",
@@ -517,19 +598,15 @@ export default function App() {
         await listen<null>("hotkey-pressed", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-pressed (state=${s})`);
-          if (s === "capturing" || s === "recording" || s === "streaming") {
+          if (s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-pressed: cancelling");
             cancelStream();
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
-            // Rust already moved+showed the window synchronously before this event
-            // arrived. Call position_overlay again as a React-side confirmation so
-            // any failure is visible in DevTools rather than silently swallowed.
-            invoke("position_overlay").catch((e: unknown) => {
-              console.error("[vox] position_overlay failed:", e);
-            });
-            // Capture focused window context before recording starts — target still has focus
+            // Rust already moved+showed the window synchronously before this event.
+            // Skipping the redundant React-side position_overlay invoke trims
+            // ~5-20 ms off the press → "Listening…" transition.
             invoke<DeepContextPayload>("get_focused_context")
               .then((ctx) => {
                 contextRef.current = ctx;
@@ -556,7 +633,17 @@ export default function App() {
         await listen<null>("hotkey-released", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
-          if (s === "capturing" || s === "recording" || s === "streaming") {
+          // Auto-stop mode = tap-to-start: hotkey-released is a no-op while
+          // recording. Sidecar's silence detector will terminate the session.
+          const autoStop = (() => {
+            try {
+              const raw = localStorage.getItem("vox_settings");
+              return raw ? (JSON.parse(raw).autoStopEnabled ?? false) : false;
+            } catch {
+              return false;
+            }
+          })();
+          if ((s === "recording" || s === "streaming") && !autoStop) {
             const elapsed = Date.now() - recordingStartTimeRef.current;
             const partial =
               s === "streaming"
@@ -567,13 +654,26 @@ export default function App() {
                     }
                   ).partial.trim()
                 : "";
-            // Always terminate — sidecar's VAD + hallucination gate filter silence.
-            // Empty result returns handoff_ready with empty string → frontend resets to idle.
+            // No-speech short-circuit: hotkey released without any audio above
+            // the speech-level threshold (rms ~> 0.002) — skip final pass + LLM
+            // + inject entirely. Saves the ~3-5 s distil pass on this machine.
+            if (!speechDetectedRef.current && !partial) {
+              console.log(
+                `[vox] hotkey-released: no speech detected — cancelling (elapsed=${elapsed}ms)`,
+              );
+              cancelStream();
+              dispatch({ type: "CANCEL_RECORDING" });
+            } else {
+              console.log(
+                `[vox] hotkey-released: terminating — elapsed=${elapsed}ms, speechDetected=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}"`,
+              );
+              terminateStream();
+              dispatch({ type: "STOP_RECORDING" });
+            }
+          } else if (autoStop && (s === "recording" || s === "streaming")) {
             console.log(
-              `[vox] hotkey-released: terminating — elapsed=${elapsed}ms, speechDetected=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}"`,
+              "[vox] hotkey-released: auto-stop mode — sidecar drives termination",
             );
-            terminateStream();
-            dispatch({ type: "STOP_RECORDING" });
           } else if (s === "waiting_for_models" || s === "degraded") {
             // Hotkey pressed while models still loading — park window immediately
             getCurrentWindow()
@@ -616,6 +716,32 @@ export default function App() {
           );
           dispatch({ type: "MODELS_DEGRADED", missing: e.payload.missing });
           // Do NOT showWindow() — window only appears on hotkey press
+        }),
+      );
+
+      cleanups.push(
+        await listen<null>("undo-pressed", () => {
+          const s = stateRef.current.status;
+          console.log(`[vox] event: undo-pressed (state=${s})`);
+          // Rust already sent Ctrl+Z to the target. Re-record only from idle to
+          // avoid stomping on an in-flight session.
+          if (s !== "idle") {
+            return;
+          }
+          invoke<DeepContextPayload>("get_focused_context")
+            .then((ctx) => {
+              contextRef.current = ctx;
+            })
+            .catch(() => {
+              contextRef.current = null;
+            });
+          invoke("position_overlay").catch(() => {});
+          levelRef.current = 0;
+          lastLevelTimeRef.current = 0;
+          speechDetectedRef.current = false;
+          recordingStartTimeRef.current = Date.now();
+          beginStream();
+          dispatch({ type: "START_RECORDING" });
         }),
       );
 
@@ -687,15 +813,16 @@ export default function App() {
     }
   }, [state.status]);
 
-  // Capturing timeout: if sidecar never opens mic (no audio_level for 10s), bail out
+  // Recording-state safety timeout: if no audio_level event arrives in 10 s,
+  // mic or WS pipeline is dead — bail out.
   useEffect(() => {
-    if (state.status === "capturing") {
-      const id = setTimeout(
-        () => dispatch({ type: "ERROR", message: "Mic not responding" }),
-        10_000,
-      );
-      return () => clearTimeout(id);
-    }
+    if (state.status !== "recording") return;
+    const id = setTimeout(() => {
+      if (lastLevelTimeRef.current === 0) {
+        dispatch({ type: "ERROR", message: "Mic not responding" });
+      }
+    }, 10_000);
+    return () => clearTimeout(id);
   }, [state.status]);
 
   useEffect(() => {
@@ -711,10 +838,6 @@ export default function App() {
         .setPosition(new LogicalPosition(-10000, -10000))
         .then(() => console.log("[vox] window: parked ok"))
         .catch((e: unknown) => console.error("[vox] window: park failed", e));
-    } else if (state.status === "capturing") {
-      console.log(
-        "[vox] window: entering capturing — Rust already moved+showed",
-      );
     }
   }, [state.status]);
 

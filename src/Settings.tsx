@@ -37,6 +37,10 @@ interface VoxSettings {
   defaultStyle: string;
   retentionDays: 0 | 7 | 30 | null;
   hotkey: string;
+  skipLlmIfSimple: boolean;
+  autoStopEnabled: boolean;
+  autoStopThresholdMs: number;
+  streamingInject: boolean;
 }
 
 const DEFAULT_SETTINGS: VoxSettings = {
@@ -49,6 +53,10 @@ const DEFAULT_SETTINGS: VoxSettings = {
   defaultStyle: "auto",
   retentionDays: null,
   hotkey: "CommandOrControl+Shift+Space",
+  skipLlmIfSimple: true,
+  autoStopEnabled: false,
+  autoStopThresholdMs: 1500,
+  streamingInject: false,
 };
 
 const SETTINGS_KEY = "vox_settings";
@@ -389,6 +397,21 @@ export default function Settings() {
   }) {
     try {
       await fetch(API("/settings/audio"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function setDictationSetting(patch: {
+    auto_stop_enabled?: boolean;
+    auto_stop_threshold_ms?: number;
+  }) {
+    try {
+      await fetch(API("/settings/dictation"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
@@ -788,6 +811,76 @@ export default function Settings() {
             Transcripts are saved to your local data directory only. Never
             transmitted. Used to fine-tune the model from the Fine-Tuning
             dashboard.
+          </p>
+        </div>
+
+        {/* Dictation Behavior Section */}
+        <div style={SECTION}>
+          <div style={SECTION_LABEL}>Dictation Behavior</div>
+
+          <label style={TOGGLE_LABEL}>
+            <input
+              type="checkbox"
+              checked={settings.autoStopEnabled}
+              onChange={(e) => {
+                update({ autoStopEnabled: e.target.checked });
+                setDictationSetting({ auto_stop_enabled: e.target.checked });
+              }}
+            />
+            Auto-stop after silence
+          </label>
+          <p style={HINT}>
+            Tap hotkey to start; sidecar ends recording when you pause.
+            Push-to-talk still works when off.
+          </p>
+          {settings.autoStopEnabled && (
+            <div style={{ ...ROW, marginTop: 8 }}>
+              <label style={{ fontSize: 13, color: "#666", flexShrink: 0 }}>
+                Silence threshold
+              </label>
+              <input
+                type="range"
+                min={1000}
+                max={3000}
+                step={100}
+                value={settings.autoStopThresholdMs}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  update({ autoStopThresholdMs: v });
+                  setDictationSetting({ auto_stop_threshold_ms: v });
+                }}
+                style={{ flex: 1 }}
+              />
+              <span style={{ fontSize: 13, color: "#1a1a1a", width: 60 }}>
+                {(settings.autoStopThresholdMs / 1000).toFixed(1)}s
+              </span>
+            </div>
+          )}
+
+          <label style={{ ...TOGGLE_LABEL, marginTop: 14 }}>
+            <input
+              type="checkbox"
+              checked={settings.skipLlmIfSimple}
+              onChange={(e) => update({ skipLlmIfSimple: e.target.checked })}
+            />
+            Skip LLM cleanup for simple dictations
+          </label>
+          <p style={HINT}>
+            Bypass the LLM when the transcript is short and well-formed (~1.5 s
+            faster).
+          </p>
+
+          <label style={{ ...TOGGLE_LABEL, marginTop: 14 }}>
+            <input
+              type="checkbox"
+              checked={settings.streamingInject}
+              onChange={(e) => update({ streamingInject: e.target.checked })}
+            />
+            Stream text as the LLM generates
+          </label>
+          <p style={HINT}>
+            Types each character as it arrives. Feels instant; do not type
+            yourself while injecting.
           </p>
         </div>
 
