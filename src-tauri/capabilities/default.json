@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Vox",
-  "windows": ["main", "settings", "finetune"],
+  "windows": ["main", "settings", "finetune", "history"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",

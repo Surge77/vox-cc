@@ -13,6 +13,7 @@ type AppState =
   | { status: "recording" }
   | { status: "streaming"; partial: string }
   | { status: "finalizing" }
+  | { status: "previewing"; transcript: string }
   | { status: "injecting" }
   | { status: "error"; message: string };
 
@@ -26,6 +27,8 @@ type AppAction =
   | { type: "CANCEL_RECORDING" }
   | { type: "PARTIAL_UPDATE"; content: string }
   | { type: "HANDOFF_READY"; canaryTranscript: string }
+  | { type: "PREVIEW_READY"; transcript: string }
+  | { type: "PREVIEW_CANCEL" }
   | { type: "INJECTION_DONE" }
   | { type: "SIDECAR_RESTARTING" }
   | { type: "ERROR"; message: string }
@@ -59,6 +62,8 @@ interface DeepContextPayload {
   inferred_extension: string | null;
   text_preceding_cursor: string;
   text_succeeding_cursor: string;
+  app_url: string | null;
+  app_file_path: string | null;
 }
 
 interface ProcessTextRequest {
@@ -73,6 +78,8 @@ interface ProcessTextRequest {
   custom_vocabulary: string[];
   style?: string;
   skip_llm_if_simple?: boolean;
+  app_url?: string | null;
+  app_file_path?: string | null;
 }
 
 // ── Port discovery ─────────────────────────────────────────────────────────────
@@ -158,8 +165,19 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "HANDOFF_READY":
       if (state.status === "finalizing") return { status: "injecting" };
       return state;
+    case "PREVIEW_READY":
+      // Reachable from injecting (after /process-text fetch) when the
+      // previewBeforeInject toggle is on.
+      if (state.status === "injecting")
+        return { status: "previewing", transcript: action.transcript };
+      return state;
+    case "PREVIEW_CANCEL":
+      // Esc during preview → cancel inject entirely
+      if (state.status === "previewing") return { status: "idle" };
+      return state;
     case "INJECTION_DONE":
-      if (state.status === "injecting") return { status: "idle" };
+      if (state.status === "injecting" || state.status === "previewing")
+        return { status: "idle" };
       return state;
     case "SIDECAR_RESTARTING":
       return { status: "waiting_for_models" };
@@ -373,6 +391,10 @@ export default function App() {
   const contextRef = useRef<DeepContextPayload | null>(null);
   const speechDetectedRef = useRef(false);
   const recordingStartTimeRef = useRef(0);
+  // Continuous mode (Tier 2 #10) — once the user enters continuous on a
+  // hotkey-press, this stays true until they press the hotkey again (toggle)
+  // or cancel. After each successful inject, if true, recording restarts.
+  const continuousActiveRef = useRef(false);
 
   const handleHandoff = useCallback(
     async (canaryTranscript: string) => {
@@ -399,6 +421,9 @@ export default function App() {
             useLlm?: boolean;
             skipLlmIfSimple?: boolean;
             streamingInject?: boolean;
+            previewBeforeInject?: boolean;
+            continuousMode?: boolean;
+            autoStopEnabled?: boolean;
           };
         } catch {
           return {};
@@ -416,6 +441,8 @@ export default function App() {
         custom_vocabulary: [],
         style: storedSettings.defaultStyle ?? "auto",
         skip_llm_if_simple: storedSettings.skipLlmIfSimple ?? true,
+        app_url: ctx?.app_url ?? null,
+        app_file_path: ctx?.app_file_path ?? null,
       };
 
       let elevationError = false;
@@ -532,6 +559,19 @@ export default function App() {
         if (resp.ok) {
           const data = await resp.json();
           if (data.cleaned_text) textToInject = data.cleaned_text;
+          // Tier 2 #6 — voice command short-circuit: invoke the keypress
+          // command and return without injecting text.
+          if (data.command_key) {
+            console.log("[vox] voice command:", data.command_key);
+            try {
+              await invoke("inject_keypress", { combo: data.command_key });
+            } catch (err) {
+              console.error("[vox] inject_keypress failed:", err);
+            }
+            contextRef.current = null;
+            dispatch({ type: "INJECTION_DONE" });
+            return;
+          }
           console.log(
             "[vox] handleHandoff: cleaned_len=",
             data.cleaned_text?.length ?? 0,
@@ -543,6 +583,21 @@ export default function App() {
         }
       } catch (e) {
         console.warn("[vox] process-text fetch failed, injecting raw:", e);
+      }
+
+      // Optional preview before inject: show the cleaned transcript in the
+      // capsule for ~500 ms. User can press Esc during that window to abort
+      // the inject. PREVIEW_CANCEL flips state to idle; the inject below
+      // checks stateRef.current.status to skip.
+      if (storedSettings.previewBeforeInject) {
+        dispatch({ type: "PREVIEW_READY", transcript: textToInject });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (stateRef.current.status !== "previewing") {
+          // User pressed Esc — preview was cancelled
+          console.log("[vox] preview: cancelled by user, skipping inject");
+          contextRef.current = null;
+          return;
+        }
       }
 
       try {
@@ -600,10 +655,28 @@ export default function App() {
           console.log(`[vox] event: hotkey-pressed (state=${s})`);
           if (s === "recording" || s === "streaming") {
             console.log("[vox] hotkey-pressed: cancelling");
+            continuousActiveRef.current = false;
             cancelStream();
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
+            // Read continuous + auto-stop on session start so the toggle
+            // can be flipped between sessions without restart.
+            const settings = (() => {
+              try {
+                return JSON.parse(
+                  localStorage.getItem("vox_settings") ?? "{}",
+                ) as {
+                  continuousMode?: boolean;
+                  autoStopEnabled?: boolean;
+                };
+              } catch {
+                return {};
+              }
+            })();
+            continuousActiveRef.current = !!(
+              settings.continuousMode && settings.autoStopEnabled
+            );
             // Rust already moved+showed the window synchronously before this event.
             // Skipping the redundant React-side position_overlay invoke trims
             // ~5-20 ms off the press → "Listening…" transition.
@@ -720,6 +793,60 @@ export default function App() {
       );
 
       cleanups.push(
+        await listen<null>("continuous-toggle", () => {
+          const s = stateRef.current.status;
+          console.log(`[vox] event: continuous-toggle (state=${s})`);
+          // Press toggles continuous mode. If already armed (continuousActiveRef
+          // true), turn it off and cancel any active session. If off, arm it
+          // and start a session if idle. Auto-stop must also be enabled —
+          // sidecar drives segment boundaries on silence.
+          if (continuousActiveRef.current) {
+            console.log("[vox] continuous: disarming");
+            continuousActiveRef.current = false;
+            if (s === "recording" || s === "streaming") {
+              cancelStream();
+              dispatch({ type: "CANCEL_RECORDING" });
+            }
+            return;
+          }
+          // Force-enable auto-stop in the persisted settings so the sidecar
+          // segments on silence — otherwise continuous mode has no way to end
+          // a segment without a user gesture.
+          try {
+            const raw = localStorage.getItem("vox_settings");
+            const parsed = raw ? JSON.parse(raw) : {};
+            parsed.autoStopEnabled = true;
+            parsed.continuousMode = true;
+            localStorage.setItem("vox_settings", JSON.stringify(parsed));
+          } catch {
+            // best effort
+          }
+          fetch(`http://127.0.0.1:${sidecarPort}/settings/dictation`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ auto_stop_enabled: true }),
+          }).catch(() => {});
+
+          continuousActiveRef.current = true;
+          if (s === "idle") {
+            invoke<DeepContextPayload>("get_focused_context")
+              .then((ctx) => {
+                contextRef.current = ctx;
+              })
+              .catch(() => {
+                contextRef.current = null;
+              });
+            levelRef.current = 0;
+            lastLevelTimeRef.current = 0;
+            speechDetectedRef.current = false;
+            recordingStartTimeRef.current = Date.now();
+            beginStream();
+            dispatch({ type: "START_RECORDING" });
+          }
+        }),
+      );
+
+      cleanups.push(
         await listen<null>("undo-pressed", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: undo-pressed (state=${s})`);
@@ -813,6 +940,21 @@ export default function App() {
     }
   }, [state.status]);
 
+  // Esc-to-cancel during transcript preview. window-level capture so the
+  // overlay's mouse-transparent / no-focus posture doesn't swallow the key.
+  useEffect(() => {
+    if (state.status !== "previewing") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        dispatch({ type: "PREVIEW_CANCEL" });
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [state.status]);
+
   // Recording-state safety timeout: if no audio_level event arrives in 10 s,
   // mic or WS pipeline is dead — bail out.
   useEffect(() => {
@@ -833,18 +975,45 @@ export default function App() {
   // setPosition keeps WebView2 compositor active (no reinit, no black/transparent flash).
   useEffect(() => {
     if (state.status === "idle") {
+      // Continuous mode (Tier 2 #10): if a session just finished and the
+      // continuous flag is still armed, restart the recording instead of
+      // parking. Window stays in place; capsule re-renders bars.
+      if (continuousActiveRef.current) {
+        console.log("[vox] continuous: restarting recording after inject");
+        invoke("position_overlay").catch(() => {});
+        invoke<DeepContextPayload>("get_focused_context")
+          .then((ctx) => {
+            contextRef.current = ctx;
+          })
+          .catch(() => {
+            contextRef.current = null;
+          });
+        levelRef.current = 0;
+        lastLevelTimeRef.current = 0;
+        speechDetectedRef.current = false;
+        recordingStartTimeRef.current = Date.now();
+        beginStream();
+        dispatch({ type: "START_RECORDING" });
+        return;
+      }
       console.log("[vox] window: parking at -10000,-10000 (state=idle)");
       getCurrentWindow()
         .setPosition(new LogicalPosition(-10000, -10000))
         .then(() => console.log("[vox] window: parked ok"))
         .catch((e: unknown) => console.error("[vox] window: park failed", e));
     }
-  }, [state.status]);
+  }, [state.status, beginStream]);
 
   return (
     <StreamingOverlay
       status={state.status}
-      partial={state.status === "streaming" ? state.partial : ""}
+      partial={
+        state.status === "streaming"
+          ? state.partial
+          : state.status === "previewing"
+            ? state.transcript
+            : ""
+      }
       degraded={state.status === "degraded" ? state.missing : []}
       errorMessage={state.status === "error" ? state.message : ""}
       processingMsg={state.status === "finalizing" ? processingMsg : ""}

@@ -37,6 +37,34 @@ def _read_audio_settings() -> dict:
         return {}
 
 
+# Whitelist of language codes accepted by faster-whisper. "auto" → None →
+# Whisper performs auto-detect per session. Anything else: keep "en" default
+# behavior unless user picks a supported code.
+SUPPORTED_LANGUAGES = {"en", "hi", "es", "fr", "de", "ja", "zh", "pt", "ru", "it", "ko", "ar", "nl"}
+
+
+def resolve_language(code: str | None) -> str | None:
+    """Map a settings value to the `language` argument for Whisper.transcribe.
+
+    - "auto" / "" / None → None (Whisper auto-detect)
+    - one of SUPPORTED_LANGUAGES → that code
+    - anything else → fall back to "en" for safety (avoids passing junk into
+      the model and getting unexpected behavior).
+    """
+    if not code:
+        return None
+    normalized = code.strip().lower()
+    if normalized == "auto":
+        return None
+    if normalized in SUPPORTED_LANGUAGES:
+        return normalized
+    return "en"
+
+
+def load_language_setting() -> str | None:
+    return resolve_language(_read_audio_settings().get("language"))
+
+
 def _dedup_overlap(prev_tail: list[str], new_text: str) -> str:
     """Remove from new_text any prefix that repeats the suffix of prev_tail.
     Handles the 200ms overlap region where Turbo may re-transcribe earlier words."""
@@ -170,7 +198,7 @@ class DictationSession:
             segments, _ = turbo.transcribe(
                 feed,
                 word_timestamps=False,   # textual dedup instead — avoids expensive timestamp scan
-                language="en",
+                language=load_language_setting(),  # None → auto-detect; else supported code
                 beam_size=1,
                 condition_on_previous_text=False,  # prevents hallucination feedback loops
                 initial_prompt=vocab_prompt or None,

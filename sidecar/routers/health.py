@@ -98,6 +98,7 @@ async def set_audio_settings(req: AudioSettingsRequest):
 class DictationSettingsRequest(BaseModel):
     auto_stop_enabled: bool | None = None
     auto_stop_threshold_ms: int | None = None
+    auto_learn_enabled: bool | None = None
 
 
 @router.post("/settings/dictation")
@@ -114,10 +115,39 @@ async def set_dictation_settings(req: DictationSettingsRequest):
     if req.auto_stop_threshold_ms is not None:
         # Clamp to safe range — UI slider is 1000-3000 but be defensive
         settings["auto_stop_threshold_ms"] = max(500, min(5000, req.auto_stop_threshold_ms))
+    if req.auto_learn_enabled is not None:
+        settings["auto_learn_enabled"] = req.auto_learn_enabled
     os.makedirs(state.DATA_DIR, exist_ok=True)
     with open(settings_path, "w") as f:
         json.dump(settings, f)
     return {"ok": True}
+
+
+class LanguageRequest(BaseModel):
+    language: str  # "en", "hi", "es", "fr", "de", "ja", "zh", "auto", …
+
+
+@router.post("/settings/language")
+async def set_language(req: LanguageRequest):
+    """Persists the user's selected dictation language. Read once per Turbo
+    chunk and once at distil final pass via `audio.pipeline.load_language_setting`.
+    Takes effect on the next utterance — no restart required."""
+    import main as state
+    from audio.pipeline import resolve_language
+
+    settings_path = os.path.join(state.DATA_DIR, "settings.json")
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        settings = {}
+    # Validate but persist the raw value so "auto" round-trips correctly.
+    _ = resolve_language(req.language)
+    settings["language"] = req.language
+    os.makedirs(state.DATA_DIR, exist_ok=True)
+    with open(settings_path, "w") as f:
+        json.dump(settings, f)
+    return {"ok": True, "language": req.language}
 
 
 class PrivacySettingsRequest(BaseModel):

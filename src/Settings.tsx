@@ -41,6 +41,10 @@ interface VoxSettings {
   autoStopEnabled: boolean;
   autoStopThresholdMs: number;
   streamingInject: boolean;
+  language: string; // "auto" | "en" | "hi" | "es" | "fr" | "de" | "ja" | "zh" | …
+  autoLearnEnabled: boolean;
+  previewBeforeInject: boolean;
+  continuousMode: boolean;
 }
 
 const DEFAULT_SETTINGS: VoxSettings = {
@@ -57,7 +61,28 @@ const DEFAULT_SETTINGS: VoxSettings = {
   autoStopEnabled: false,
   autoStopThresholdMs: 1500,
   streamingInject: false,
+  language: "en",
+  autoLearnEnabled: false,
+  previewBeforeInject: false,
+  continuousMode: false,
 };
+
+const LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: "auto", label: "Auto-detect" },
+  { code: "en", label: "English" },
+  { code: "hi", label: "Hindi" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "ja", label: "Japanese" },
+  { code: "zh", label: "Chinese" },
+  { code: "pt", label: "Portuguese" },
+  { code: "ru", label: "Russian" },
+  { code: "it", label: "Italian" },
+  { code: "ko", label: "Korean" },
+  { code: "ar", label: "Arabic" },
+  { code: "nl", label: "Dutch" },
+];
 
 const SETTINGS_KEY = "vox_settings";
 
@@ -92,7 +117,11 @@ const ROOT: React.CSSProperties = {
   fontSize: 16,
   color: "#1a1a1a",
   background: "#fff",
-  minHeight: "100vh",
+  // Fixed-height scroll container — Tauri window is 600x500 and the body
+  // would otherwise clip without a scrollbar. height: 100vh + overflow-y: auto
+  // makes the inner CONTAINER scrollable while the chrome stays put.
+  height: "100vh",
+  overflowY: "auto",
   padding: 0,
   margin: 0,
 };
@@ -409,6 +438,7 @@ export default function Settings() {
   async function setDictationSetting(patch: {
     auto_stop_enabled?: boolean;
     auto_stop_threshold_ms?: number;
+    auto_learn_enabled?: boolean;
   }) {
     try {
       await fetch(API("/settings/dictation"), {
@@ -418,6 +448,19 @@ export default function Settings() {
       });
     } catch {
       // non-fatal
+    }
+  }
+
+  async function setLanguage(code: string) {
+    update({ language: code });
+    try {
+      await fetch(API("/settings/language"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: code }),
+      });
+    } catch {
+      // non-fatal — local setting persisted; sidecar will pick up next session
     }
   }
 
@@ -538,6 +581,27 @@ export default function Settings() {
               )}
             </>
           )}
+        </div>
+
+        {/* Language Section */}
+        <div style={SECTION}>
+          <div style={SECTION_LABEL}>Dictation Language</div>
+          <select
+            style={SELECT}
+            value={settings.language}
+            onChange={(e) => setLanguage(e.target.value)}
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+          <p style={HINT}>
+            Whisper transcribes in the selected language. "Auto-detect" runs
+            slower on the first chunk but adapts to your spoken language. Takes
+            effect on the next utterance.
+          </p>
         </div>
 
         {/* Audio Device Section */}
@@ -881,6 +945,52 @@ export default function Settings() {
           <p style={HINT}>
             Types each character as it arrives. Feels instant; do not type
             yourself while injecting.
+          </p>
+
+          <label style={{ ...TOGGLE_LABEL, marginTop: 14 }}>
+            <input
+              type="checkbox"
+              checked={settings.autoLearnEnabled}
+              onChange={(e) => {
+                update({ autoLearnEnabled: e.target.checked });
+                setDictationSetting({ auto_learn_enabled: e.target.checked });
+              }}
+            />
+            Auto-learn vocabulary from LLM corrections
+          </label>
+          <p style={HINT}>
+            When the LLM cleanup adds new terms (≥4 chars, not common words),
+            append them to your custom vocabulary so Whisper recognizes them
+            next time.
+          </p>
+
+          <label style={{ ...TOGGLE_LABEL, marginTop: 14 }}>
+            <input
+              type="checkbox"
+              checked={settings.previewBeforeInject}
+              onChange={(e) =>
+                update({ previewBeforeInject: e.target.checked })
+              }
+            />
+            Show 500 ms preview before injecting
+          </label>
+          <p style={HINT}>
+            Capsule shows the cleaned transcript briefly so you can press Esc to
+            cancel obvious mistranscriptions. Adds 500 ms to every dictation.
+          </p>
+
+          <label style={{ ...TOGGLE_LABEL, marginTop: 14 }}>
+            <input
+              type="checkbox"
+              checked={settings.continuousMode}
+              onChange={(e) => update({ continuousMode: e.target.checked })}
+            />
+            Continuous dictation mode
+          </label>
+          <p style={HINT}>
+            After each injection the mic restarts automatically. Requires
+            Auto-stop to also be enabled — sidecar segments speech on silence.
+            Press the hotkey again to exit continuous mode.
           </p>
         </div>
 

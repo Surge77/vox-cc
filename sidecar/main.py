@@ -360,6 +360,7 @@ from routers.vocabulary import router as vocabulary_router
 from routers.finetuning import router as finetuning_router
 from routers.snippets import router as snippets_router
 from routers.replay import router as replay_router
+from routers.voice_commands import router as voice_commands_router
 app.include_router(health_router)
 app.include_router(dictation_router)
 app.include_router(text_processing_router)
@@ -367,6 +368,7 @@ app.include_router(vocabulary_router)
 app.include_router(finetuning_router)
 app.include_router(snippets_router)
 app.include_router(replay_router)
+app.include_router(voice_commands_router)
 
 
 if __name__ == "__main__":

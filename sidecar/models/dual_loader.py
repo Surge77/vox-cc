@@ -94,9 +94,12 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> tuple[
         audio_feed = _pre_emphasis(_peak_normalize(trimmed))
 
         vocab_prompt = _get_vocab_prompt()
+        # Multi-language: same setting as the Turbo streaming path. None means
+        # Whisper auto-detects per session.
+        from audio.pipeline import load_language_setting
         segments, _ = distil.transcribe(
             audio_feed,
-            language="en",
+            language=load_language_setting(),
             beam_size=5,                       # spec value — greedy beam=1 caused phonetic errors (fox→fog/bronze)
             condition_on_previous_text=False,
             word_timestamps=True,

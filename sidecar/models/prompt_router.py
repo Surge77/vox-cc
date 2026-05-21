@@ -70,6 +70,24 @@ def render_system_prompt(
         base = _load_prompt("neutral_fallback")
 
     context_parts: list[str] = []
+
+    # Language-preserve guard (Tier 2 #5): the prompts are English instructions,
+    # but if the user dictates in another language the LLM must not translate.
+    # Read the active dictation language from settings.json each call so the
+    # toggle takes effect without a sidecar restart.
+    try:
+        from audio.pipeline import load_language_setting
+        lang = load_language_setting()
+    except Exception:
+        lang = None
+    if lang and lang != "en":
+        context_parts.append(
+            "IMPORTANT: The user dictated in a non-English language. "
+            "Return the cleaned text IN THE SAME LANGUAGE as the input. "
+            "Never translate. Preserve the original script (e.g. Devanagari, "
+            "Hangul, Han, Cyrillic) and word forms."
+        )
+
     if vocabulary:
         vocab_str = ", ".join(vocabulary[:50])
         context_parts.append(f"Custom terms to preserve exactly as spelled: {vocab_str}.")

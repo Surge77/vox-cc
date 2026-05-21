@@ -67,8 +67,9 @@ pub async fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), Str
         .unregister_all()
         .map_err(|e| e.to_string())?;
     register_hotkey(&app, &hotkey)?;
-    // Re-arm the undo hotkey too — `unregister_all` cleared it.
+    // Re-arm secondary hotkeys too — `unregister_all` cleared them.
     register_undo_hotkey(&app).ok();
+    register_continuous_hotkey(&app).ok();
     if let Some(path) = hotkey_file() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -76,6 +77,45 @@ pub async fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), Str
         std::fs::write(&path, &hotkey).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Registers Ctrl+Shift+C as a global continuous-mode toggle. On press: snapshot
+/// the focused HWND (same as the dictation hotkey) and emit `continuous-toggle`.
+/// Frontend flips the continuous flag and starts/stops a session accordingly.
+pub fn register_continuous_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut("CommandOrControl+Shift+C", move |_, _, event| {
+            if !matches!(event.state(), ShortcutState::Pressed) {
+                return;
+            }
+            // Snapshot HWND so an inject after the first segment targets the
+            // correct window (same pattern as the primary dictation hotkey).
+            let raw_hwnd = unsafe { GetForegroundWindow().0 };
+            if let Ok(mut guard) = handle.state::<crate::TargetHwnd>().0.lock() {
+                *guard = if raw_hwnd != 0 { Some(raw_hwnd) } else { None };
+            }
+            if let Some(w) = handle.get_webview_window("main") {
+                let ms = handle
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .map(|m| *m.size())
+                    .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+                let ws = w.outer_size().unwrap_or(tauri::PhysicalSize::new(420, 80));
+                let x = (ms.width as i32 - ws.width as i32) / 2;
+                let y = ms.height as i32 - ws.height as i32 - 80;
+                let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+                if let Ok(overlay_hwnd) = w.hwnd() {
+                    extern "system" {
+                        fn ShowWindow(hwnd: *mut core::ffi::c_void, n_cmd_show: i32) -> i32;
+                    }
+                    unsafe { ShowWindow(overlay_hwnd.0, 4); }
+                }
+            }
+            handle.emit("continuous-toggle", ()).ok();
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Registers Ctrl+Shift+Z as a global undo-and-re-record shortcut.

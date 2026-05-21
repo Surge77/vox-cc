@@ -2,7 +2,9 @@ use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW,
     SetClipboardData,
@@ -13,12 +15,15 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation8, IUIAutomation, IUIAutomationTextPattern2, UIA_PATTERN_ID,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
     IsWindow, IsWindowVisible, SendMessageW, SetForegroundWindow, WM_PASTE,
 };
-use windows::core::w;
+use windows::core::{w, ComInterface};
 
 // EM_REPLACESEL (0x00C2) is defined in CommCtrl.h / Win32_UI_Controls which we
 // don't feature-flag.  Define the constant directly — the value is stable ABI.
@@ -225,6 +230,40 @@ fn send_wm_paste(hwnd: HWND) {
 }
 
 // ---------------------------------------------------------------------------
+// Selection-aware dictation: query the focused element's text selection via
+// UIA so the caller can replace it instead of inserting alongside it.
+//
+// Returns true iff the focused text element has a non-empty selection.
+// Any UIA failure / element-not-text returns false (safe default — no Delete).
+//
+// Cost: ~30-150 ms depending on the app. COM is already initialized by
+// ComGuard before this is called, and `cast` is the v0.52 ComInterface API.
+// ---------------------------------------------------------------------------
+fn has_non_empty_selection() -> bool {
+    (|| -> Option<bool> {
+        unsafe {
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation8, None, CLSCTX_ALL).ok()?;
+            let focused = automation.GetFocusedElement().ok()?;
+            // UIA_TextPattern2Id == 10024 (matches context.rs)
+            let pattern: IUIAutomationTextPattern2 = focused
+                .GetCurrentPattern(UIA_PATTERN_ID(10024))
+                .ok()?
+                .cast::<IUIAutomationTextPattern2>()
+                .ok()?;
+            let sel_array = pattern.GetSelection().ok()?;
+            let range = sel_array.GetElement(0).ok()?;
+            // GetText(-1) returns the full selected text; -1 = no length limit.
+            // A non-selected caret usually returns "" but some controls return a
+            // single character — guard with chars().count() > 0 of trimmed text.
+            let text = range.GetText(-1).ok()?.to_string();
+            Some(!text.is_empty())
+        }
+    })()
+    .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // Core injection logic
 // ---------------------------------------------------------------------------
 fn inject_sync(text: &str, target_hwnd_raw: Option<isize>) -> Result<(), String> {
@@ -301,6 +340,22 @@ fn inject_sync(text: &str, target_hwnd_raw: Option<isize>) -> Result<(), String>
     // Fix 1: reliable foreground via AttachThreadInput
     force_foreground(hwnd);
     std::thread::sleep(std::time::Duration::from_millis(30));
+
+    // Selection-aware inject (Tier 2 #7): if the focused text element has a
+    // non-empty selection, send Delete first so apps that don't replace on
+    // Ctrl+V (rare but exists for custom edit controls) still see the dictated
+    // text replace the selection. Ctrl+V on a selection in standard Win32 and
+    // Chromium controls already replaces — this Delete is defensive insurance,
+    // not a functional change for the common case. Skips on UIA failure.
+    let had_selection = has_non_empty_selection();
+    if had_selection {
+        eprintln!("[inject] selection detected → sending Delete to clear before paste");
+        if let Ok(mut pre_enigo) = Enigo::new(&EnigoSettings::default()) {
+            let _ = pre_enigo.key(Key::Delete, Direction::Click);
+            // Small settle delay so the Delete is consumed before the paste
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     // Save previous clipboard contents for later restore
     let saved = clipboard.get_text().unwrap_or_default();
@@ -386,6 +441,178 @@ fn inject_text_chunk_sync(text: &str, hwnd_raw: isize) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 #6 — voice command keypress injection.
+// Parses combo strings like "ctrl+a", "enter", "ctrl+shift+left" and emits
+// them via enigo to the saved TargetHwnd.
+// ---------------------------------------------------------------------------
+
+fn parse_key_token(token: &str) -> Option<Key> {
+    Some(match token.trim().to_lowercase().as_str() {
+        "ctrl" | "control" => Key::Control,
+        "shift" => Key::Shift,
+        "alt" => Key::Alt,
+        "meta" | "win" | "super" | "cmd" => Key::Meta,
+        "enter" | "return" => Key::Return,
+        "tab" => Key::Tab,
+        "escape" | "esc" => Key::Escape,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        "space" => Key::Space,
+        "up" => Key::UpArrow,
+        "down" => Key::DownArrow,
+        "left" => Key::LeftArrow,
+        "right" => Key::RightArrow,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        single if single.chars().count() == 1 => {
+            Key::Unicode(single.chars().next()?)
+        }
+        _ => return None,
+    })
+}
+
+/// Splits a combo like "ctrl+shift+a" into modifiers + final key.
+/// Returns (modifiers, final). Empty modifiers list when the combo is just
+/// a standalone key like "enter".
+fn parse_combo(combo: &str) -> Option<(Vec<Key>, Key)> {
+    let parts: Vec<&str> = combo.split('+').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let (last, rest) = parts.split_last()?;
+    let final_key = parse_key_token(last)?;
+    let modifiers: Vec<Key> = rest
+        .iter()
+        .filter_map(|t| parse_key_token(t))
+        .collect();
+    // Reject combos that had unknown modifier tokens
+    if modifiers.len() != rest.len() {
+        return None;
+    }
+    Some((modifiers, final_key))
+}
+
+fn play_combo(combo: &str, hwnd_raw: isize) -> Result<(), String> {
+    let _com = ComGuard::init();
+    let target: HWND = if hwnd_raw != 0
+        && unsafe { IsWindow(HWND(hwnd_raw)).as_bool() }
+        && unsafe { IsWindowVisible(HWND(hwnd_raw)).as_bool() }
+    {
+        HWND(hwnd_raw)
+    } else {
+        unsafe { GetForegroundWindow() }
+    };
+    if target.0 == 0 {
+        return Err("no target window".to_string());
+    }
+    force_foreground(target);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    // Voice command "enter+enter" → two Enter presses sequentially.
+    // Split on '+' BUT inside parse_combo we treat '+'-separated tokens
+    // as a single chord. For sequences, the convention here is: a combo
+    // containing the same key twice (like "enter+enter") is interpreted
+    // by parse_combo as modifier(Enter) + final(Enter), which is not what
+    // we want. So we special-case repeated identical-token combos as
+    // sequential presses.
+    let tokens: Vec<&str> = combo.split('+').collect();
+    let all_same = tokens.len() > 1
+        && tokens
+            .iter()
+            .all(|t| t.trim().to_lowercase() == tokens[0].trim().to_lowercase());
+    if all_same {
+        let key = parse_key_token(tokens[0]).ok_or_else(|| format!("unknown key: {}", tokens[0]))?;
+        let mut enigo = Enigo::new(&EnigoSettings::default()).map_err(|e| e.to_string())?;
+        for _ in tokens.iter() {
+            enigo.key(key, Direction::Click).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let (modifiers, final_key) =
+        parse_combo(combo).ok_or_else(|| format!("invalid combo: {combo}"))?;
+    let mut enigo = Enigo::new(&EnigoSettings::default()).map_err(|e| e.to_string())?;
+    for m in &modifiers {
+        enigo.key(*m, Direction::Press).map_err(|e| e.to_string())?;
+    }
+    enigo.key(final_key, Direction::Click).map_err(|e| e.to_string())?;
+    for m in modifiers.iter().rev() {
+        enigo.key(*m, Direction::Release).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn inject_keypress(
+    combo: String,
+    hwnd_state: tauri::State<'_, crate::TargetHwnd>,
+) -> Result<(), String> {
+    // Use the snapshotted target HWND if available — fall back to the current
+    // foreground window. We don't consume the TargetHwnd slot here so a
+    // command does not interfere with a queued inject_text on the same press.
+    let raw = hwnd_state.0.lock().map_err(|e| e.to_string())?.unwrap_or(0);
+    tokio::task::spawn_blocking(move || play_combo(&combo, raw))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod combo_tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_key() {
+        let (mods, key) = parse_combo("enter").unwrap();
+        assert!(mods.is_empty());
+        assert!(matches!(key, Key::Return));
+    }
+
+    #[test]
+    fn parses_modifier_combo() {
+        let (mods, key) = parse_combo("ctrl+a").unwrap();
+        assert_eq!(mods.len(), 1);
+        assert!(matches!(mods[0], Key::Control));
+        assert!(matches!(key, Key::Unicode('a')));
+    }
+
+    #[test]
+    fn parses_multi_modifier_combo() {
+        let (mods, key) = parse_combo("ctrl+shift+left").unwrap();
+        assert_eq!(mods.len(), 2);
+        assert!(matches!(mods[0], Key::Control));
+        assert!(matches!(mods[1], Key::Shift));
+        assert!(matches!(key, Key::LeftArrow));
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert!(parse_combo("CTRL+A").is_some());
+        assert!(parse_combo("Ctrl+Shift+Left").is_some());
+    }
+
+    #[test]
+    fn rejects_unknown_token() {
+        assert!(parse_combo("ctrl+xyzzy").is_none());
+        assert!(parse_combo("garble+a").is_none());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        // split on '+' of "" yields [""]. parse_key_token("") → no match.
+        assert!(parse_combo("").is_none());
+    }
+
+    #[test]
+    fn function_keys_not_supported_yet() {
+        // F-keys would need explicit entries; verify they don't silently
+        // map to single-char Unicode.
+        assert!(parse_combo("f1").is_none());
+    }
+}
+
 /// Sends Ctrl+Z to `hwnd_raw` (or the foreground window if 0/stale). Used by
 /// the undo hotkey. Synchronous; runs on whichever thread invokes it.
 pub fn undo_in_target(hwnd_raw: isize) {
@@ -439,7 +666,10 @@ pub async fn inject_text(
 
 /// Begin a streaming-inject session. Takes the captured target HWND from
 /// `TargetHwnd` and stores it in `StreamTarget` so subsequent `inject_text_chunk`
-/// calls can target the right window across the LLM token stream.
+/// calls can target the right window across the LLM token stream. Also runs
+/// the selection-aware Delete pre-step once, before any deltas arrive —
+/// per-chunk selection checks would re-query UIA on every token, adding
+/// 30–150 ms each.
 #[tauri::command]
 pub async fn begin_stream_inject(
     hwnd_state: tauri::State<'_, crate::TargetHwnd>,
@@ -447,6 +677,29 @@ pub async fn begin_stream_inject(
 ) -> Result<(), String> {
     let raw = hwnd_state.0.lock().map_err(|e| e.to_string())?.take();
     *stream_target.0.lock().map_err(|e| e.to_string())? = raw;
+    // Do the selection check + Delete on a worker thread so we don't block
+    // the async runtime with UIA / enigo calls.
+    let hwnd_raw = raw.unwrap_or(0);
+    if hwnd_raw == 0 {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || {
+        let _com = ComGuard::init();
+        let target = HWND(hwnd_raw);
+        if !unsafe { IsWindow(target).as_bool() } {
+            return;
+        }
+        force_foreground(target);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        if has_non_empty_selection() {
+            if let Ok(mut enigo) = Enigo::new(&EnigoSettings::default()) {
+                let _ = enigo.key(Key::Delete, Direction::Click);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import App from "./App";
 import Settings from "./Settings";
 import FineTuningDashboard from "./FineTuningDashboard";
+import History from "./History";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <BrowserRouter>
@@ -10,6 +11,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       <Route path="/" element={<App />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/finetune" element={<FineTuningDashboard />} />
+      <Route path="/history" element={<History />} />
     </Routes>
-  </BrowserRouter>
+  </BrowserRouter>,
 );

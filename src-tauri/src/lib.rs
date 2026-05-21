@@ -38,6 +38,7 @@ pub fn run() {
             commands::context::get_focused_context,
             commands::hotkey::set_hotkey,
             commands::inject::inject_text,
+            commands::inject::inject_keypress,
             commands::inject::begin_stream_inject,
             commands::inject::inject_text_chunk,
             commands::inject::end_stream_inject,
@@ -46,6 +47,7 @@ pub fn run() {
             commands::windows::hide_main_window,
             commands::windows::open_settings_window,
             commands::windows::open_finetune_window,
+            commands::windows::open_history_window,
         ])
         .setup(setup_app)
         .run(tauri::generate_context!())
@@ -133,13 +135,18 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = commands::hotkey::register_undo_hotkey(app.handle()) {
         eprintln!("[hotkey] undo hotkey not registered: {e}");
     }
+    // Register Ctrl+Shift+C continuous-mode toggle.
+    if let Err(e) = commands::hotkey::register_continuous_hotkey(app.handle()) {
+        eprintln!("[hotkey] continuous hotkey not registered: {e}");
+    }
 
     // System tray
     let open_item = MenuItemBuilder::with_id("open_settings", "Settings").build(app)?;
+    let history_item = MenuItemBuilder::with_id("open_history", "History").build(app)?;
     let devtools_item = MenuItemBuilder::with_id("devtools", "Debug: Open DevTools").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "Quit Vox").build(app)?;
     let menu = MenuBuilder::new(app)
-        .items(&[&open_item, &devtools_item, &quit_item])
+        .items(&[&open_item, &history_item, &devtools_item, &quit_item])
         .build()?;
 
     let app_handle = app.handle().clone();
@@ -156,6 +163,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "open_settings" => {
                 if let Err(e) = commands::windows::open_settings_window_inner(&app_handle) {
                     eprintln!("Settings window error: {e}");
+                }
+            }
+            "open_history" => {
+                if let Err(e) = commands::windows::open_history_window_inner(&app_handle) {
+                    eprintln!("History window error: {e}");
                 }
             }
             "devtools" => {

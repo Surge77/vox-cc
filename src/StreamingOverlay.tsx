@@ -9,6 +9,7 @@ export type AppStatus =
   | "recording"
   | "streaming"
   | "finalizing"
+  | "previewing"
   | "injecting"
   | "error";
 
@@ -381,6 +382,44 @@ function OverlayCard({
             {trailingLabel}
           </span>
         )}
+      </div>
+    );
+  }
+
+  if (status === "previewing") {
+    // partial holds the cleaned transcript that's about to be injected.
+    // User has ~500 ms to press Esc and abort the inject.
+    return (
+      <div
+        className="vox-capsule"
+        style={{ ...CAPSULE, borderColor: "rgba(59, 130, 246, 0.45)" }}
+      >
+        <span
+          style={{
+            flex: "1 1 auto",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            direction: "rtl",
+            textAlign: "left",
+            color: "#1a1a1a",
+            fontSize: 13,
+          }}
+        >
+          <bdo dir="ltr">{partial || "…"}</bdo>
+        </span>
+        <span
+          style={{
+            color: "#1d4ed8",
+            fontSize: 11,
+            fontWeight: 500,
+            letterSpacing: "0.01em",
+            flexShrink: 0,
+          }}
+        >
+          Esc to cancel
+        </span>
       </div>
     );
   }

@@ -24,12 +24,19 @@ class ProcessTextRequest(BaseModel):
     custom_vocabulary: list[str] = []
     style: str = "auto"
     skip_llm_if_simple: bool = False
+    # Tier 2 #8 — extended app context. None when not applicable / UIA failed.
+    app_url: str | None = None
+    app_file_path: str | None = None
 
 
 class ProcessTextResponse(BaseModel):
     cleaned_text: str
     error: str | None = None
     skipped_llm: bool = False
+    # Tier 2 #6 — when raw transcript matches a voice command, the sidecar
+    # short-circuits LLM cleanup and returns the key combo for the Tauri
+    # layer to replay via inject_keypress. cleaned_text is empty in that case.
+    command_key: str | None = None
 
 
 # ── Smart skip-LLM heuristic ──────────────────────────────────────────────────
@@ -76,6 +83,12 @@ async def process_text(req: ProcessTextRequest):
 
     if not raw:
         return ProcessTextResponse(cleaned_text="")
+
+    # Tier 2 #6 — voice commands take priority over LLM cleanup.
+    from routers.voice_commands import load_commands, match_command
+    cmd = match_command(raw, load_commands(state.DATA_DIR))
+    if cmd is not None:
+        return ProcessTextResponse(cleaned_text="", command_key=cmd)
 
     if req.skip_llm_if_simple and is_simple_clean_text(raw):
         cleaned = _expand_snippets(state.DATA_DIR, raw)
@@ -147,6 +160,86 @@ def _expand_snippets(data_dir: str, text: str) -> str:
     return text
 
 
+# Vocabulary auto-learning helpers (Tier 2 #12) ──────────────────────────────
+# Common English stopwords that should NEVER be auto-added even if the LLM
+# inserts them. Keeps the vocab list focused on domain terms.
+_AUTOLEARN_STOPWORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "they", "them",
+    "their", "have", "will", "would", "could", "should", "about", "after",
+    "before", "your", "you're", "what", "when", "where", "which", "while",
+    "into", "than", "then", "been", "being", "were", "more", "some",
+    "also", "just", "only", "very", "much", "still", "even", "back",
+    "over", "under", "such", "here", "there", "these", "those", "other",
+}
+_AUTOLEARN_MIN_LEN = 4
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercased alphanumeric word tokens. Strips punctuation."""
+    return re.findall(r"[A-Za-z][A-Za-z0-9]+", text.lower())
+
+
+def extract_new_tokens(raw: str, cleaned: str) -> list[str]:
+    """Return tokens present in `cleaned` but not in `raw` that look like
+    candidate domain-specific vocab words: ≥4 chars, alphanumeric, not a
+    stopword. Deduplicated, order-preserving.
+
+    Used by the auto-learn pipeline to flag terms the LLM corrected into the
+    transcript that the user may want to add to their custom vocabulary.
+    """
+    raw_tokens = set(_tokenize(raw))
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in _tokenize(cleaned):
+        if tok in raw_tokens or tok in seen:
+            continue
+        if len(tok) < _AUTOLEARN_MIN_LEN:
+            continue
+        if tok in _AUTOLEARN_STOPWORDS:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
+def _maybe_auto_learn_vocab(data_dir: str, raw: str, cleaned: str) -> None:
+    """Append new tokens to vocabulary.json when auto-learn is enabled.
+
+    Reads `auto_learn_enabled` from settings.json — gated by user opt-in.
+    Preserves the existing vocab order; new tokens append at the end.
+    """
+    import json
+    settings_path = os.path.join(data_dir, "settings.json")
+    try:
+        with open(settings_path) as f:
+            if not json.load(f).get("auto_learn_enabled", False):
+                return
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+
+    new_tokens = extract_new_tokens(raw, cleaned)
+    if not new_tokens:
+        return
+
+    vocab_path = os.path.join(data_dir, "vocabulary.json")
+    try:
+        with open(vocab_path) as f:
+            existing = json.load(f)
+        if not isinstance(existing, list):
+            existing = []
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing = []
+
+    existing_lc = {w.lower() for w in existing if isinstance(w, str)}
+    added = [tok for tok in new_tokens if tok not in existing_lc]
+    if not added:
+        return
+
+    os.makedirs(data_dir, exist_ok=True)
+    with open(vocab_path, "w") as f:
+        json.dump(existing + added, f, indent=2)
+
+
 def _append_passive_log(
     data_dir: str,
     raw: str,
@@ -154,15 +247,27 @@ def _append_passive_log(
     executable_name: str,
     llm_ms: int | None = None,
 ) -> None:
+    # Auto-learn vocab runs independently of passive logging: a user can
+    # opt into vocab learning without sharing transcripts with the
+    # fine-tuning collector.
+    _maybe_auto_learn_vocab(data_dir, raw, cleaned)
+
     import json
     from datetime import datetime, timezone
+    # History logging is enabled by default — the user can disable it via
+    # the privacy retention slider (retention_days=0 stops collection).
+    # Passive_collection_enabled still gates the heavier audio-clip save
+    # (handled separately in routers/dictation._maybe_save_audio).
     settings_path = os.path.join(data_dir, "settings.json")
     try:
         with open(settings_path) as f:
-            if not json.load(f).get("passive_collection_enabled", False):
+            settings = json.load(f)
+            if settings.get("history_logging_enabled", True) is False:
+                return
+            if settings.get("retention_days") == 0:
                 return
     except (FileNotFoundError, json.JSONDecodeError):
-        return
+        pass  # default behavior is to log
 
     from models.prompt_router import get_profile
     import main as state
@@ -222,6 +327,16 @@ async def process_text_stream(req: ProcessTextRequest):
             yield _sse_pack("done", {"cleaned_text": ""})
 
         return StreamingResponse(_empty(), media_type="text/event-stream")
+
+    # Voice command short-circuit (Tier 2 #6) — applies in streaming mode too.
+    from routers.voice_commands import load_commands, match_command
+    cmd = match_command(raw, load_commands(state.DATA_DIR))
+    if cmd is not None:
+
+        async def _cmd():
+            yield _sse_pack("done", {"cleaned_text": "", "command_key": cmd})
+
+        return StreamingResponse(_cmd(), media_type="text/event-stream")
 
     if req.skip_llm_if_simple and is_simple_clean_text(raw):
         cleaned = _expand_snippets(state.DATA_DIR, raw)

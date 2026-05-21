@@ -54,6 +54,60 @@ async def log_correction(req: CorrectionRequest) -> dict:
     return {"ok": True}
 
 
+# ── Tier 2 #11 — history view ────────────────────────────────────────────────
+HISTORY_MAX_LIMIT = 500
+
+
+def _read_log_entries(log_path: str) -> list[dict]:
+    """Parses passive_log.jsonl into a list. Skips malformed lines silently —
+    a single bad write should not break the whole history view."""
+    entries: list[dict] = []
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
+        return []
+    return entries
+
+
+def filter_history(
+    entries: list[dict], query: str = "", limit: int = 200
+) -> list[dict]:
+    """Newest-first slice. Optional case-insensitive substring filter against
+    raw_asr / user_edited / executable_name fields. Pure function for tests."""
+    capped = min(max(limit, 1), HISTORY_MAX_LIMIT)
+    q = query.strip().lower()
+    if q:
+        def matches(e: dict) -> bool:
+            for field in ("raw_asr", "user_edited", "executable_name"):
+                v = e.get(field)
+                if isinstance(v, str) and q in v.lower():
+                    return True
+            return False
+        filtered = [e for e in entries if matches(e)]
+    else:
+        filtered = list(entries)
+    # Newest first
+    filtered.reverse()
+    return filtered[:capped]
+
+
+@router.get("/history")
+async def history(q: str = "", limit: int = 200) -> dict:
+    """Returns the most recent dictation log entries, newest first.
+    Optional `q` performs a case-insensitive substring match across raw_asr,
+    user_edited, and executable_name."""
+    import main as state
+    log_path = os.path.join(state.DATA_DIR, "passive_log.jsonl")
+    entries = _read_log_entries(log_path)
+    items = filter_history(entries, query=q, limit=limit)
+    return {"items": items, "total_in_log": len(entries)}
+
+
 @router.get("/replay/stats")
 async def replay_stats() -> dict:
     """Return aggregate stats from passive_log.jsonl."""

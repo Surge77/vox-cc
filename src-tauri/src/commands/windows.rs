@@ -14,7 +14,11 @@ fn open_window(
     tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(path.into()))
         .title(title)
         .inner_size(width, height)
-        .resizable(false)
+        // Resizable + min size let the user expand to see everything when the
+        // panel grows past the default. Settings has many sections; clipping
+        // is a real bug, not cosmetic.
+        .resizable(true)
+        .min_inner_size(400.0, 400.0)
         .skip_taskbar(false)
         .build()
         .map(|_| ())
@@ -22,7 +26,8 @@ fn open_window(
 }
 
 pub fn open_settings_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
-    open_window(app, "settings", "Vox Settings", "/settings", 600.0, 500.0)
+    // Taller default — fits Dictation Behavior + Language + new toggles
+    open_window(app, "settings", "Vox Settings", "/settings", 600.0, 720.0)
 }
 
 pub fn open_finetune_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
@@ -34,6 +39,10 @@ pub fn open_finetune_window_inner(app: &tauri::AppHandle) -> Result<(), String> 
         700.0,
         600.0,
     )
+}
+
+pub fn open_history_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
+    open_window(app, "history", "Vox History", "/history", 800.0, 600.0)
 }
 
 #[tauri::command]
@@ -73,4 +82,9 @@ pub fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn open_finetune_window(app: tauri::AppHandle) -> Result<(), String> {
     open_finetune_window_inner(&app)
+}
+
+#[tauri::command]
+pub fn open_history_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_history_window_inner(&app)
 }
