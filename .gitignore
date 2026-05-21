@@ -58,7 +58,8 @@ desktop.ini
 .claudeignore
 global-claude-config/
 *.stackdump
-**/CLAUDE.md
+# CLAUDE.md is tracked — project architecture, constraints, failed experiments.
+# CLAUDE.local.md is machine-specific (paths, hardware, venv state) — never push.
 **/CLAUDE.local.md
 
 # Local preview/prototype pages
