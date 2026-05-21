@@ -25,197 +25,123 @@ export interface StreamingOverlayProps {
   onCancel: () => void;
 }
 
-// ── Waveform constants ────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
 
-// Pearl Compact (v2) — 11-bar EQ profile
-const BAR_MULTIPLIERS = [
-  0.22, 0.46, 0.72, 0.96, 0.82, 0.58, 0.78, 0.4, 0.25, 0.52, 0.88,
-];
-// Each bar oscillates at its own period (ms). Reduced ~30% from original for more reactive animation.
-const BAR_SPEEDS = [89, 68, 51, 79, 58, 97, 47, 72, 106, 62, 76];
-const NUM_BARS = BAR_MULTIPLIERS.length;
+// 11 bars — matches `audio_level.bands` from the sidecar 1:1. See
+// `audio/capture.PersistentMicCapture._compute_band_amplitudes`.
+const NUM_BARS = 11;
+
+// Variant #10 — squared compact pill. 14 px corner radius, larger bars.
 const MIN_BAR_H = 3;
-const MAX_BAR_H = 34; // was 28 — wider dynamic range for more visible motion
+const MAX_BAR_H = 17;
 
-// ── CSS ───────────────────────────────────────────────────────────────────────
+const BAR_SPEEDS = [89, 68, 51, 79, 58, 97, 47, 72, 106, 62, 76];
 
-export const OVERLAY_STYLES = `
+// Bar color per status. Frozen states ease to a uniform low baseline while
+// the inline spinner (right of bars) conveys active processing.
+const STATE_COLORS: Record<AppStatus, string> = {
+  waiting_for_models: "rgba(255,255,255,0.45)",
+  degraded: "#ffd28a",
+  idle: "rgba(255,255,255,0.6)",
+  recording: "#ffffff",
+  streaming: "#ffffff",
+  finalizing: "rgba(255,255,255,0.55)", // dimmed white — paused, spinner does the work
+  previewing: "#cdb8ff",
+  injecting: "#b8ffb8",
+  error: "#ff8a8a",
+};
+
+// Frozen-bar baseline per non-animated state. Uniform low height across all
+// bars so the pill reads as "at rest, processing" — not "stuck mid-wave".
+// Live bars ease into this baseline over ~250 ms (see useWaveformAnimation),
+// so the transition from streaming → finalizing settles instead of snapping.
+const FROZEN_BASELINE: Partial<Record<AppStatus, number>> = {
+  finalizing: 0.14,
+  injecting: 0.2,
+  previewing: 0.18,
+  error: 0.12,
+  degraded: 0.1,
+};
+
+// ── CSS (single style tag) ───────────────────────────────────────────────────
+
+const OVERLAY_STYLES = `
   @keyframes vox-spin { to { transform: rotate(360deg); } }
-  @keyframes vox-capsule-breathe { 50% { transform: translateY(-1px) scale(1.018); } }
 
-  .vox-capsule {
+  /* Variant #10 — squared compact pill */
+  .vox-pill {
     position: relative;
-    isolation: isolate;
-    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 14px;
+    background: linear-gradient(180deg, #1c1d22 0%, #08090b 100%);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 14px;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.05),
+      0 4px 10px rgba(0,0,0,0.35);
+    transition: box-shadow 200ms ease-out, opacity 200ms ease-out;
   }
-  .vox-capsule::before {
-    content: "";
-    position: absolute;
-    inset: 1px;
-    border-radius: 999px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.22), transparent 58%);
-    pointer-events: none;
-    z-index: -1;
+  .vox-pill[data-state="error"] {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.05),
+      0 0 12px 1px rgba(255, 100, 100, 0.55),
+      0 4px 10px rgba(0,0,0,0.35);
   }
-  .vox-capsule::after {
-    content: "";
-    position: absolute;
-    inset: auto 13px 6px;
-    height: 1px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.76);
-    pointer-events: none;
+  .vox-pill[data-state="recording"],
+  .vox-pill[data-state="streaming"] {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.05),
+      0 0 8px 0.5px rgba(255,255,255,0.10),
+      0 4px 10px rgba(0,0,0,0.35);
   }
-  .vox-capsule-active { animation: vox-capsule-breathe 1.7s ease-in-out infinite; }
+  .vox-pill[data-state="injecting"] { opacity: 0.92; }
 
-  .vox-icon-x {
-    position: relative;
+  .vox-bar {
+    width: 2.5px;
+    height: ${MIN_BAR_H}px;
+    border-radius: 2px;
     flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    display: inline-grid;
-    place-items: center;
-    border: none;
-    border-radius: 999px;
-    background: rgba(20, 28, 36, 0.07);
-    padding: 0;
-    cursor: default;
+    transition: background-color 180ms ease-out;
   }
-  .vox-icon-x::before,
-  .vox-icon-x::after {
-    content: "";
-    position: absolute;
-    width: 11px;
-    height: 2px;
-    border-radius: 999px;
-    background: #5a6470;
-  }
-  .vox-icon-x::before { transform: rotate(45deg); }
-  .vox-icon-x::after  { transform: rotate(-45deg); }
 
-  .vox-icon-check {
-    position: relative;
+  /* Inline loader — focal point of the processing capsule. Sits inside the
+     pill, right of the bars, during finalizing/injecting/previewing.
+     Full opacity from frame 1 — no entry animation, no fade. The loader IS
+     the "I saw your key release" signal; any opacity ramp delays that. */
+  .vox-loader {
+    width: 18px;
+    height: 18px;
+    margin-left: 10px;
     flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    display: inline-grid;
-    place-items: center;
-    border: none;
-    border-radius: 999px;
-    background: rgba(20, 28, 36, 0.07);
-    padding: 0;
-    cursor: default;
+    border-radius: 50%;
+    border: 2.2px solid rgba(255,255,255,0.25);
+    border-top-color: #ffffff;
+    animation: vox-spin 0.5s linear infinite;
+    box-sizing: border-box;
+    box-shadow: 0 0 6px rgba(255,255,255,0.18);
   }
-  .vox-icon-check::before {
-    content: "";
-    display: block;
-    width: 12px;
-    height: 7px;
-    border-left: 2px solid #1d2329;
-    border-bottom: 2px solid #1d2329;
-    transform: translateY(-1px) rotate(-45deg);
+
+  /* Bars dim instantly in processing states so the loader dominates. */
+  .vox-pill[data-state="finalizing"] .vox-bar,
+  .vox-pill[data-state="injecting"] .vox-bar,
+  .vox-pill[data-state="previewing"] .vox-bar {
+    opacity: 0.35;
   }
 `;
 
-// ── Style objects ─────────────────────────────────────────────────────────────
+// ── Bar animation hook ───────────────────────────────────────────────────────
 
-export const CAPSULE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 9,
-  padding: "0 9px",
-  height: 50,
-  minWidth: 206,
-  background: "rgba(255, 255, 255, 0.96)",
-  borderRadius: 999,
-  border: "1px solid rgba(43, 54, 62, 0.12)",
-  color: "#1d2329",
-  fontFamily: "system-ui, -apple-system, sans-serif",
-  fontSize: 13,
-  whiteSpace: "nowrap",
-};
-
-export const PEARL_PILL: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "0 16px",
-  height: 36,
-  background: "rgba(255, 255, 255, 0.96)",
-  borderRadius: 999,
-  border: "1px solid rgba(43, 54, 62, 0.12)",
-  boxShadow: "0 4px 12px rgba(41, 52, 61, 0.12)",
-  color: "#1d2329",
-  fontFamily: "system-ui, -apple-system, sans-serif",
-  fontSize: 13,
-};
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-export function WaveformBars({
-  barsRef,
-}: {
-  barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 3,
-        height: 26,
-        flex: "1 1 auto",
-        justifyContent: "center",
-        minWidth: 84,
-      }}
-    >
-      {Array.from({ length: NUM_BARS }, (_, i) => (
-        <div
-          key={i}
-          ref={(el) => {
-            barsRef.current[i] = el;
-          }}
-          style={{
-            width: 3,
-            height: MIN_BAR_H,
-            background: "linear-gradient(180deg, #111a22, #65707a)",
-            borderRadius: 999,
-            flexShrink: 0,
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-export function Spinner() {
-  return (
-    <div
-      style={{
-        width: 15,
-        height: 15,
-        border: "2px solid rgba(43, 54, 62, 0.15)",
-        borderTopColor: "#1d2329",
-        borderRadius: "50%",
-        animation: "vox-spin 0.75s linear infinite",
-        flexShrink: 0,
-      }}
-    />
-  );
-}
-
-// ── Bar animation hook ────────────────────────────────────────────────────────
-
-export function useWaveformAnimation(
+function useWaveformAnimation(
   barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>,
   levelRef: React.MutableRefObject<number>,
   lastLevelTimeRef: React.MutableRefObject<number>,
   bandsRef: React.MutableRefObject<number[]>,
+  status: AppStatus,
 ) {
-  // Per-bar smoothed values — each bar tracks its own band with fast attack /
-  // slow decay so the spectrum reads as a real-time analyzer not a sine wave.
-  const smoothedBandsRef = React.useRef<number[]>(new Array(NUM_BARS).fill(0));
+  const smoothedRef = React.useRef<number[]>(new Array(NUM_BARS).fill(0));
   const rafRef = React.useRef<number>();
 
   React.useEffect(() => {
@@ -226,245 +152,99 @@ export function useWaveformAnimation(
       const hasRealBands =
         hasRealLevel && Array.isArray(bands) && bands.length === NUM_BARS;
 
-      // Idle floor — gentle motion when no level events / no bands.
-      const idleLevel = 0.18;
+      const baseline = FROZEN_BASELINE[status];
 
       barsRef.current.forEach((bar, i) => {
         if (!bar) return;
 
-        // Real-spectrum branch: bar i ← FFT band i (with per-bar attack/decay).
-        // Fallback branch: two-frequency compound sine like before, modulated
-        // by the legacy single-scalar level (back-compat with old sidecars).
         let target: number;
-        if (hasRealBands) {
-          // Aggressive gamma (0.5) expands mid range so quiet SST audio
-          // moves bars dramatically. Add a small per-bar wobble that's
-          // independent of the spectrum so even a held vowel doesn't look
-          // frozen — bars "breathe" instead of locking at one height.
-          const raw = Math.min(1, Math.max(0, bands[i]));
-          const expanded = Math.pow(raw, 0.5);
-          const spd = BAR_SPEEDS[i];
-          const ph = (i / NUM_BARS) * Math.PI * 2;
-          const wobble = 0.08 * Math.sin(t / spd + ph); // ±8% organic jitter
-          target = Math.max(0, Math.min(1, expanded + wobble));
-        } else if (hasRealLevel) {
-          const raw = Math.min(1, levelRef.current * 12);
-          const spd = BAR_SPEEDS[i];
-          const ph1 = (i / NUM_BARS) * Math.PI * 2;
-          const ph2 = ph1 + 2.1;
-          const osc =
-            Math.sin(t / spd + ph1) * 0.65 +
-            Math.sin(t / (spd * 1.6) + ph2) * 0.35;
-          target = (idleLevel + raw * 0.82) * ((osc + 1) / 2);
+        if (baseline !== undefined) {
+          // Frozen state: ease toward uniform low baseline. Same smoothing
+          // pipeline as live bars below — peak → baseline settles over
+          // ~250 ms instead of snapping. Reads as "calm + processing".
+          target = baseline;
+          // Hard snap to baseline on first frozen frame — no smoothing.
+          // The loader (rendered the same frame state transitions) is the
+          // sole "processing" signal; bars must commit to a static rest
+          // shape immediately so they don't compete for attention.
+          const next = target;
+          smoothedRef.current[i] = next;
+          const h = MIN_BAR_H + next * (MAX_BAR_H - MIN_BAR_H);
+          bar.style.height = `${Math.max(MIN_BAR_H, h)}px`;
+          return;
         } else {
-          // Pure idle motion — slow sine, very low amplitude.
+          // Always-on flowing baseline: two-harmonic sine per bar with unique
+          // phase + speed so the pill never looks flat, even during silence.
+          // Range ~0.05 → 0.55, organic wave-like motion across all 11 bars.
+          const spd = BAR_SPEEDS[i];
           const ph = (i / NUM_BARS) * Math.PI * 2;
-          target = idleLevel * (0.6 + 0.4 * Math.sin(t / 480 + ph));
+          const baseFlow =
+            0.28 +
+            0.18 * Math.sin(t / spd + ph) +
+            0.1 * Math.sin(t / (spd * 1.7) + ph * 1.3);
+
+          if (hasRealBands) {
+            // Live audio: expand the band, blend with the baseline so loud
+            // peaks dominate but quiet input still rides the wave instead
+            // of collapsing to a dead-flat row of dots.
+            const raw = Math.min(1, Math.max(0, bands[i]));
+            const expanded = Math.pow(raw, 0.5);
+            target = Math.max(baseFlow, expanded);
+          } else if (hasRealLevel) {
+            // Scalar level only (older sidecar build, no per-band data).
+            const raw = Math.min(1, levelRef.current * 12);
+            target = Math.max(baseFlow, raw * 0.9);
+          } else {
+            // No audio events at all — pure baseline motion.
+            target = baseFlow;
+          }
         }
 
-        // Per-bar smoothing — looser than before so bars actually swing.
-        // Attack: 0.85 (was 0.8) — snappier rise on speech onset.
-        // Decay:  0.72 (was 0.88) — bars fall faster, won't appear "stuck".
-        const prev = smoothedBandsRef.current[i];
+        const prev = smoothedRef.current[i];
         const next =
           target > prev
             ? prev * 0.15 + target * 0.85
             : prev * 0.72 + target * 0.28;
-        smoothedBandsRef.current[i] = next;
+        smoothedRef.current[i] = next;
 
-        const peak = MIN_BAR_H + BAR_MULTIPLIERS[i] * (MAX_BAR_H - MIN_BAR_H);
-        const h = MIN_BAR_H + next * (peak - MIN_BAR_H);
+        const h = MIN_BAR_H + next * (MAX_BAR_H - MIN_BAR_H);
         bar.style.height = `${Math.max(MIN_BAR_H, h)}px`;
       });
 
       rafRef.current = requestAnimationFrame(animate);
     };
-
     rafRef.current = requestAnimationFrame(animate);
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [barsRef, levelRef, lastLevelTimeRef, bandsRef]);
+  }, [barsRef, levelRef, lastLevelTimeRef, bandsRef, status]);
 }
 
-// ── Overlay card ──────────────────────────────────────────────────────────────
-
-function OverlayCard({
-  status,
-  partial,
-  degraded,
-  errorMessage,
-  processingMsg,
-  barsRef,
-  onCancel,
-}: {
-  status: AppStatus;
-  partial: string;
-  degraded: string[];
-  errorMessage: string;
-  processingMsg: string;
-  barsRef: React.MutableRefObject<Array<HTMLDivElement | null>>;
-  onCancel: () => void;
-}) {
-  if (status === "idle" || status === "waiting_for_models") return null;
-
-  if (status === "degraded") {
-    return (
-      <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
-        <div
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: "50%",
-            background: "#ef4444",
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ color: "#b91c1c" }}>
-          Degraded{degraded.length > 0 ? `: ${degraded.join(", ")}` : ""}
-        </span>
-      </div>
-    );
-  }
-
-  if (status === "error") {
-    return (
-      <div style={{ ...PEARL_PILL, borderColor: "rgba(239, 68, 68, 0.25)" }}>
-        <span style={{ color: "#b91c1c" }}>{errorMessage || "Error"}</span>
-      </div>
-    );
-  }
-
-  if (status === "recording" || status === "streaming") {
-    const hasPartial = !!partial;
-    const trailingLabel = hasPartial ? "" : "Listening…";
-
-    return (
-      <div className="vox-capsule vox-capsule-active" style={CAPSULE}>
-        <button
-          className="vox-icon-x"
-          onClick={onCancel}
-          aria-label="Cancel recording"
-          style={{ cursor: "pointer" }}
-        />
-        {/* Waveform always visible during capture — continuous "still recording"
-            signal. Sits left of the partial transcript so the bars keep moving
-            even as text grows. */}
-        <WaveformBars barsRef={barsRef} />
-        {hasPartial && (
-          <span
-            style={{
-              flex: "1 1 auto",
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              direction: "rtl", // newest words stay visible on the right
-              textAlign: "left",
-            }}
-            title={partial}
-          >
-            {/* bidi-LTR wrapper so rtl direction only affects clipping,
-                not character order */}
-            <bdo dir="ltr">{partial}</bdo>
-          </span>
-        )}
-        {trailingLabel && (
-          <span
-            style={{
-              color: "#5a6470",
-              fontSize: 12,
-              fontWeight: 500,
-              flexShrink: 0,
-              letterSpacing: "0.01em",
-            }}
-          >
-            {trailingLabel}
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  if (status === "previewing") {
-    // partial holds the cleaned transcript that's about to be injected.
-    // User has ~500 ms to press Esc and abort the inject.
-    return (
-      <div
-        className="vox-capsule"
-        style={{ ...CAPSULE, borderColor: "rgba(59, 130, 246, 0.45)" }}
-      >
-        <span
-          style={{
-            flex: "1 1 auto",
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            direction: "rtl",
-            textAlign: "left",
-            color: "#1a1a1a",
-            fontSize: 13,
-          }}
-        >
-          <bdo dir="ltr">{partial || "…"}</bdo>
-        </span>
-        <span
-          style={{
-            color: "#1d4ed8",
-            fontSize: 11,
-            fontWeight: 500,
-            letterSpacing: "0.01em",
-            flexShrink: 0,
-          }}
-        >
-          Esc to cancel
-        </span>
-      </div>
-    );
-  }
-
-  if (status === "finalizing" || status === "injecting") {
-    return (
-      <div className="vox-capsule" style={CAPSULE}>
-        <Spinner />
-        <span
-          style={{
-            color: "#5a6470",
-            fontSize: 12,
-            fontWeight: 500,
-            letterSpacing: "0.01em",
-          }}
-        >
-          {status === "finalizing"
-            ? processingMsg || "Processing…"
-            : "Injecting…"}
-        </span>
-      </div>
-    );
-  }
-
-  return null;
-}
-
-// ── Main export ───────────────────────────────────────────────────────────────
+// ── Main export ──────────────────────────────────────────────────────────────
 
 export default function StreamingOverlay({
   status,
-  partial,
-  degraded,
-  errorMessage,
-  processingMsg,
   levelRef,
   lastLevelTimeRef,
   bandsRef,
-  onCancel,
 }: StreamingOverlayProps) {
   const barsRef = React.useRef<Array<HTMLDivElement | null>>(
     new Array(NUM_BARS).fill(null),
   );
 
-  useWaveformAnimation(barsRef, levelRef, lastLevelTimeRef, bandsRef);
+  useWaveformAnimation(barsRef, levelRef, lastLevelTimeRef, bandsRef, status);
+
+  if (status === "idle" || status === "waiting_for_models") {
+    // Empty render — Rust parks the window off-screen for these states.
+    return <style>{OVERLAY_STYLES}</style>;
+  }
+
+  const color = STATE_COLORS[status];
+  // Spinner visible while sidecar/LLM/inject pipeline runs.
+  const showLoader =
+    status === "finalizing" ||
+    status === "injecting" ||
+    status === "previewing";
 
   return (
     <>
@@ -479,15 +259,19 @@ export default function StreamingOverlay({
           background: "transparent",
         }}
       >
-        <OverlayCard
-          status={status}
-          partial={partial}
-          degraded={degraded}
-          errorMessage={errorMessage}
-          processingMsg={processingMsg}
-          barsRef={barsRef}
-          onCancel={onCancel}
-        />
+        <div className="vox-pill" data-state={status}>
+          {Array.from({ length: NUM_BARS }, (_, i) => (
+            <div
+              key={i}
+              ref={(el) => {
+                barsRef.current[i] = el;
+              }}
+              className="vox-bar"
+              style={{ background: color }}
+            />
+          ))}
+          {showLoader && <div className="vox-loader" />}
+        </div>
       </div>
     </>
   );

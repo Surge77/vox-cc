@@ -240,6 +240,9 @@ function useWebSocket(
         // Speech-detected gates the no-speech short-circuit in hotkey-released.
         // Idle meter runs 30 Hz at all times; only mark detected during sessions
         // (reducer ignores STREAM_STARTED now — recording state set on press).
+        // Threshold 0.064 — calibrated to Intel SST mic baseline. Higher
+        // values (0.15) miss quiet but real speech and cause the no-speech
+        // cancel path to swallow legitimate utterances.
         if (msg.level > 0.064) speechDetectedRef.current = true;
         return; // high-frequency, no logging
       }
@@ -660,23 +663,15 @@ export default function App() {
             dispatch({ type: "CANCEL_RECORDING" });
           } else if (s === "idle") {
             console.log("[vox] hotkey-pressed: starting recording");
-            // Read continuous + auto-stop on session start so the toggle
-            // can be flipped between sessions without restart.
-            const settings = (() => {
-              try {
-                return JSON.parse(
-                  localStorage.getItem("vox_settings") ?? "{}",
-                ) as {
-                  continuousMode?: boolean;
-                  autoStopEnabled?: boolean;
-                };
-              } catch {
-                return {};
-              }
-            })();
-            continuousActiveRef.current = !!(
-              settings.continuousMode && settings.autoStopEnabled
-            );
+            // Continuous mode is now session-only — armed only via the
+            // continuous-toggle hotkey (Ctrl+Shift+C). It is NOT re-derived
+            // from persisted settings on every hotkey press, because
+            // Ctrl+Shift+C historically force-wrote continuousMode=true to
+            // localStorage and never cleared it — leaving every later
+            // push-to-talk session looping back to "recording" after inject
+            // instead of parking. Capsule must die on inject.
+            // (continuousActiveRef left untouched here; only the
+            //  continuous-toggle listener arms/disarms it.)
             // Rust already moved+showed the window synchronously before this event.
             // Skipping the redundant React-side position_overlay invoke trims
             // ~5-20 ms off the press → "Listening…" transition.
@@ -687,6 +682,11 @@ export default function App() {
               .catch(() => {
                 contextRef.current = null;
               });
+            // LLM kv-cache prewarm removed — llama-cpp-python is NOT
+            // thread-safe; concurrent calls from prewarm + /process-text on
+            // the same Llama instance caused hangs/slowdowns. Re-enable
+            // only when llm_engine gains a proper asyncio.Lock that wraps
+            // every invocation including the prewarm path.
             levelRef.current = 0;
             lastLevelTimeRef.current = 0;
             speechDetectedRef.current = false;
@@ -706,8 +706,13 @@ export default function App() {
         await listen<null>("hotkey-released", () => {
           const s = stateRef.current.status;
           console.log(`[vox] event: hotkey-released (state=${s})`);
-          // Auto-stop mode = tap-to-start: hotkey-released is a no-op while
-          // recording. Sidecar's silence detector will terminate the session.
+          // Auto-stop mode is meant for *tap-and-go* (press, release fast,
+          // keep talking, sidecar terminates on silence). If the user HELD
+          // the hotkey for >500 ms, they're doing push-to-talk — release
+          // should terminate immediately so the loader shows now, not after
+          // the silence detector fires ~1.5 s later. continuous-toggle
+          // force-writes autoStopEnabled=true to settings; this guard keeps
+          // push-to-talk responsive even when that flag is on.
           const autoStop = (() => {
             try {
               const raw = localStorage.getItem("vox_settings");
@@ -716,8 +721,10 @@ export default function App() {
               return false;
             }
           })();
-          if ((s === "recording" || s === "streaming") && !autoStop) {
-            const elapsed = Date.now() - recordingStartTimeRef.current;
+          const heldMs = Date.now() - recordingStartTimeRef.current;
+          const longHold = heldMs > 500;
+          const treatAsPushToTalk = !autoStop || longHold;
+          if (s === "recording" || s === "streaming") {
             const partial =
               s === "streaming"
                 ? (
@@ -727,26 +734,30 @@ export default function App() {
                     }
                   ).partial.trim()
                 : "";
-            // No-speech short-circuit: hotkey released without any audio above
-            // the speech-level threshold (rms ~> 0.002) — skip final pass + LLM
-            // + inject entirely. Saves the ~3-5 s distil pass on this machine.
+            // No-speech check runs in EVERY mode (not just push-to-talk).
+            // If the user released without any audio above threshold AND no
+            // partial Turbo text, there's nothing to transcribe — skip the
+            // 3–5 s distil pass entirely and park the capsule now. Also
+            // unblocks the auto-stop hang: if no speech ever arrived, the
+            // sidecar's SilenceDetector never arms, and the session would
+            // sit until the 60 s cap. Cancel client-side instead.
             if (!speechDetectedRef.current && !partial) {
               console.log(
-                `[vox] hotkey-released: no speech detected — cancelling (elapsed=${elapsed}ms)`,
+                `[vox] hotkey-released: no speech (heldMs=${heldMs}) — cancelling immediately`,
               );
               cancelStream();
               dispatch({ type: "CANCEL_RECORDING" });
-            } else {
+            } else if (treatAsPushToTalk) {
               console.log(
-                `[vox] hotkey-released: terminating — elapsed=${elapsed}ms, speechDetected=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}"`,
+                `[vox] hotkey-released: terminating — heldMs=${heldMs}, speechDetected=${speechDetectedRef.current}, partial="${partial.slice(0, 30)}"`,
               );
               terminateStream();
               dispatch({ type: "STOP_RECORDING" });
+            } else {
+              console.log(
+                `[vox] hotkey-released: auto-stop tap-and-go (heldMs=${heldMs}, speech=${speechDetectedRef.current}) — sidecar drives termination`,
+              );
             }
-          } else if (autoStop && (s === "recording" || s === "streaming")) {
-            console.log(
-              "[vox] hotkey-released: auto-stop mode — sidecar drives termination",
-            );
           } else if (s === "waiting_for_models" || s === "degraded") {
             // Hotkey pressed while models still loading — park window immediately
             getCurrentWindow()
@@ -809,18 +820,11 @@ export default function App() {
             }
             return;
           }
-          // Force-enable auto-stop in the persisted settings so the sidecar
-          // segments on silence — otherwise continuous mode has no way to end
-          // a segment without a user gesture.
-          try {
-            const raw = localStorage.getItem("vox_settings");
-            const parsed = raw ? JSON.parse(raw) : {};
-            parsed.autoStopEnabled = true;
-            parsed.continuousMode = true;
-            localStorage.setItem("vox_settings", JSON.stringify(parsed));
-          } catch {
-            // best effort
-          }
+          // Tell the sidecar to segment on silence for the duration of
+          // continuous mode. Do NOT persist autoStopEnabled / continuousMode
+          // to localStorage — those leak into push-to-talk sessions and
+          // cause the capsule to restart recording after every inject
+          // instead of parking.
           fetch(`http://127.0.0.1:${sidecarPort}/settings/dictation`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },

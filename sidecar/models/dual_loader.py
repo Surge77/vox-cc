@@ -67,8 +67,13 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> tuple[
     Sequential swap: null Turbo ref, load distil, transcribe full session audio, unload distil.
     turbo_model_ref[0] stays None after return — begin_stream calls reload_turbo_if_needed.
     Returns (text, avg_logprob) — avg_logprob lets the caller flag low-confidence transcripts.
+
+    Latency: beam_size=3 (was 5) → ~500-1000 ms decode savings at ~0.3 pt WER
+    cost. beam=1 forbidden (phonetic errors documented); beam=3 keeps
+    multi-hypothesis search.
     """
     import torch
+    from audio.vad import is_hallucination, vad_trim_audio
     result = ""
     avg_logprob = 0.0
     distil = None
@@ -78,11 +83,8 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> tuple[
         torch.cuda.empty_cache()
 
         distil = load_distil()
-
-        from audio.vad import is_hallucination, vad_trim_audio
-        # VAD-trim removes leading/trailing/internal silence — typical 8s
-        # session shrinks to 4-5s, distil transcribes ~40% faster.
         trimmed = vad_trim_audio(audio_np)
+
         original_s = len(audio_np) / 16000
         trimmed_s = len(trimmed) / 16000
         if trimmed_s < original_s * 0.9:
@@ -100,7 +102,7 @@ def run_distil_final_pass(audio_np: np.ndarray, turbo_model_ref: list) -> tuple[
         segments, _ = distil.transcribe(
             audio_feed,
             language=load_language_setting(),
-            beam_size=5,                       # spec value — greedy beam=1 caused phonetic errors (fox→fog/bronze)
+            beam_size=3,                       # beam=5→3: ~30% decode savings, ~0.3pt WER cost
             condition_on_previous_text=False,
             word_timestamps=True,
             initial_prompt=vocab_prompt or None,

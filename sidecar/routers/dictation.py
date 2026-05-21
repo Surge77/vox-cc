@@ -120,6 +120,15 @@ async def _run_final_pass(session: DictationSession, state, fallback: str, ws) -
         if len(audio) == 0:
             return fallback
 
+        # Short-audio bypass: distil load + decode is ~3-4s on a 4 GB GPU.
+        # For trivial recordings (<1.5s, typically a single word/phrase),
+        # the Turbo accumulated text is already good enough and the user
+        # gets the result immediately instead of waiting for the full pass.
+        # Turbo WER 10.6% vs distil 6.9% — gap is small on short utterances.
+        duration_s = len(audio) / 16000
+        if duration_s < 1.5 and fallback.strip():
+            return fallback
+
         async def _emit(stage: str, message: str) -> None:
             try:
                 await ws.send_json({"type": "processing_status", "stage": stage, "message": message})

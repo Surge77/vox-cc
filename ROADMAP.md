@@ -102,9 +102,41 @@ When distil output is short (< 60 chars) AND grammatically complete
 
 ---
 
-## Tier 2 — Feature depth
+## Tier 2 — ✓ Shipped 2026-05-20 (commit `613e0b3`)
 
-Ship after Tier 1. Each adds new use cases or significant ergonomics.
+All 8 items shipped in one push. Test counts: pytest 142 (+60), cargo 14 (+14).
+
+Key implementation notes:
+- **#7 selection-aware**: UIA `has_non_empty_selection()` queries focused
+  TextPattern2; sends Delete before paste on non-empty selection. Same
+  pre-step in `begin_stream_inject` for streaming path.
+- **#5 multi-language**: `resolve_language()` whitelist + `/settings/language`
+  endpoint. LLM prompt now appends "preserve script, never translate"
+  when language ≠ en, so Devanagari/Hangul/Han survive cleanup.
+- **#12 vocab auto-learn**: `extract_new_tokens` diffs raw vs cleaned;
+  ≥4 chars, non-stopword, non-acronym tokens appended to vocabulary.json.
+- **#9 preview**: new `previewing` reducer state; capsule shows transcript
+  with blue border + "Esc to cancel" for 500 ms before inject.
+- **#8 app context**: `parse_ide_file_path` tolerant title parser handles
+  VS Code, Cursor, JetBrains. Browser URL extraction deferred
+  (windows-0.52 IUIAutomation VARIANT shape).
+- **#6 voice commands**: `routers/voice_commands.py` matcher (defaults +
+  user overrides). New Rust `inject_keypress` combo parser handles
+  `ctrl+shift+a`, `enter+enter`, etc.
+- **#11 history**: `/history` filter endpoint + Tauri window + tray entry.
+  Decoupled from passive_collection — `history_logging_enabled` defaults
+  on, retention slider gates collection.
+- **#10 continuous**: **Ctrl+Shift+C** global hotkey toggle. Force-enables
+  auto-stop; idle-state effect auto-restarts recording after each
+  inject; either Ctrl+Shift+C or Ctrl+Shift+Space disarms.
+
+UI fix bundled: Settings window scrollable (height:100vh + overflow-y:auto)
++ resizable + 720 px tall default.
+
+Deferred to Tier 3+: browser URL extraction, continuous-mode distinct
+capsule color, auto-pause on lock screen, per-locale prompts.
+
+Original Tier 2 spec preserved below for the record.
 
 ### 5. Multi-language support
 
@@ -255,6 +287,43 @@ NEVER send: audio, transcripts, paths.
 - Check WebView2 presence, install bootstrapper if missing
 - Add Defender exclusion for `src-tauri/binaries/`
 - License agreement (MIT)
+
+---
+
+## Tier 2.5 — ✓ Shipped 2026-05-21 (post-Tier-2 polish)
+
+Latency + UX polish bundle. No new features; tighter loop.
+
+- **Capsule redesign (Variant #10).** `StreamingOverlay.tsx` cut ~280 LOC.
+  Squared compact pill (14 px radius, 17 px max bar height). Frozen-baseline
+  per-state colors (finalizing/injecting/previewing/error) replace bespoke
+  per-state geometry. Bars + partial text co-render rule preserved.
+- **Async clipboard restore.** `inject_sync` returns the instant Ctrl+V
+  dispatches; 150 ms paste-consume wait + clipboard restore moved to a
+  bg thread (`std::thread::spawn` + fresh `ComGuard::init` + new
+  `Clipboard::new` handle because arboard is `!Send` on Windows). Capsule
+  can disappear ~150 ms sooner.
+- **distil beam 5 → 3.** ~30 % decode savings, ~0.3 pt WER cost. Greedy
+  beam=1 still forbidden — phonetic substitutions documented.
+- **Short-audio bypass.** Sessions <1.5 s skip distil entirely and inject
+  Turbo text. Saves ~3-4 s on single-word/phrase dictations.
+- **Continuous-mode unstickiness.** `hotkey-pressed` no longer re-derives
+  `continuousActiveRef` from `localStorage` — Ctrl+Shift+C used to force-write
+  `continuousMode=true` and never clear it, so every later push-to-talk
+  session looped. Now session-only: armed only via Ctrl+Shift+C toggle.
+- **Held-key release in auto-stop.** Auto-stop is for tap-and-go. If user
+  holds the hotkey >500 ms, release now terminates immediately (no waiting
+  for silence detector) so the loader shows promptly.
+- **Speech threshold tuned.** `0.064` calibrated to Intel SST mic baseline.
+  `0.15` swallowed quiet but real speech.
+- **Secondary windows scrollable.** `History.tsx` and `FineTuningDashboard.tsx`
+  use `height:100vh + overflow-y:auto` to override the transparent overlay's
+  global `overflow: hidden`.
+- **Failed experiment:** LLM kv-cache prewarm endpoint on `hotkey-pressed`.
+  llama-cpp-python is not thread-safe; concurrent prewarm + `/process-text`
+  on the same `Llama` instance caused hangs. Backend endpoint and helper
+  removed. Re-enable only when `llm_engine` gains a proper `asyncio.Lock`
+  wrapping every invocation (including prewarm).
 - Optional: install to Program Files vs per-user
 
 ---

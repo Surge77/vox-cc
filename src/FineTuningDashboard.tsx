@@ -70,7 +70,11 @@ const ROOT: React.CSSProperties = {
   fontSize: 16,
   color: "#1a1a1a",
   background: "#fff",
-  minHeight: "100vh",
+  // index.html sets html/body/#root { overflow: hidden } for the transparent
+  // main overlay — secondary windows must override on their own root or
+  // long content gets clipped past the window height.
+  height: "100vh",
+  overflowY: "auto",
   padding: 0,
   margin: 0,
 };

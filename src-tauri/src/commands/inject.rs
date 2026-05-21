@@ -386,28 +386,39 @@ fn inject_sync(text: &str, target_hwnd_raw: Option<isize>) -> Result<(), String>
     enigo.key(Key::Control, Direction::Release).map_err(|e| e.to_string())?;
     eprintln!("[inject] sent Ctrl+V to hwnd={}", hwnd.0);
 
-    // Wait for target app to consume the clipboard paste.
-    // 150 ms is the original delay — still needed for slow apps (Word, Outlook).
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Drop the clipboard handle so the background thread can take a fresh one.
+    // arboard::Clipboard is !Send on Windows (holds COM pointers tied to the
+    // current STA), so we cannot move this instance across threads.
+    drop(clipboard);
 
-    // Restore clipboard only if no external process changed it while we waited.
-    // seq_before_paste was captured AFTER our own set_text + mark_clipboard_private,
-    // so under normal conditions seq_after_paste == seq_before_paste (unchanged).
-    // If it advanced further, another app wrote to clipboard — leave it alone.
-    let seq_after_paste = unsafe { GetClipboardSequenceNumber() };
-    if seq_after_paste == seq_before_paste {
-        // Nothing changed clipboard after our write → safe to restore user's content
-        if let Err(e) = clipboard.set_text(&saved) {
-            eprintln!("[inject] warn: could not restore clipboard: {e}");
-        } else {
-            eprintln!("[inject] done clipboard restored");
+    // Detach the post-paste settle + clipboard restore so the Tauri command
+    // returns the instant Ctrl+V has been dispatched. The user-visible work
+    // (text appearing in target) is done; the React capsule can now disappear
+    // without waiting for the 150 ms paste-consume window. Background thread
+    // continues the spec-required restore on its own.
+    std::thread::spawn(move || {
+        let _com = ComGuard::init();
+        // Wait for target app to consume the clipboard paste.
+        // 150 ms still required by slow apps (Word, Outlook).
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let seq_after_paste = unsafe { GetClipboardSequenceNumber() };
+        if seq_after_paste != seq_before_paste {
+            eprintln!(
+                "[inject] skipped clipboard restore: external write detected (seq {} → {})",
+                seq_before_paste, seq_after_paste
+            );
+            return;
         }
-    } else {
-        eprintln!(
-            "[inject] skipped clipboard restore: external write detected (seq {} → {})",
-            seq_before_paste, seq_after_paste
-        );
-    }
+
+        match Clipboard::new() {
+            Ok(mut cb) => match cb.set_text(&saved) {
+                Ok(()) => eprintln!("[inject] done clipboard restored (bg)"),
+                Err(e) => eprintln!("[inject] warn: could not restore clipboard: {e}"),
+            },
+            Err(e) => eprintln!("[inject] warn: bg clipboard handle failed: {e}"),
+        }
+    });
 
     Ok(())
 }
