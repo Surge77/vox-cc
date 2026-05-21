@@ -58,9 +58,9 @@ desktop.ini
 .claudeignore
 global-claude-config/
 *.stackdump
-# CLAUDE.md is tracked — project architecture, constraints, failed experiments.
-# CLAUDE.local.md is machine-specific (paths, hardware, venv state) — never push.
-**/CLAUDE.local.md
+# CLAUDE.md + CLAUDE.local.md both tracked — pushed for hiatus backup 2026-05-21.
+# Note: CLAUDE.local.md contains machine-specific paths + hardware notes. Treat as
+# snapshot, not authoritative — current machine state may diverge over time.
 
 # Local preview/prototype pages
 *loader*.html
