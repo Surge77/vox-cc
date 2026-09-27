@@ -1,5 +1,5 @@
 # Install torch with CUDA index first:
-#   pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#   pip install torch==2.13.0 torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 # Then install the rest:
 #   pip install -r requirements.txt
 # For GTX 1650 (Turing sm_75) llama-cpp-python CUDA wheel (default PyPI wheel is CPU-only):
@@ -12,9 +12,9 @@ pyaudio==0.2.14
 sounddevice==0.5.1
 faster-whisper==1.0.3
 ctranslate2==4.7.1
-transformers==4.44.2
+transformers==5.10.1
 bitsandbytes==0.43.3
-torch==2.4.1+cu121
+torch==2.13.0
 torchaudio==2.4.1+cu121
 scipy==1.14.1
 numpy==1.26.4
